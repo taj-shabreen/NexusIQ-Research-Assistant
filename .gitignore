@@ -90,7 +90,7 @@ huggingface_cache/
 .DS_Store
 Thumbs.db
 desktop.ini
-
+setup.py
 # =========================
 # Temporary Files
 # =========================
