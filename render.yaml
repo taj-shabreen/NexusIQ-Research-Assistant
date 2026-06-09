@@ -1,0 +1,75 @@
+# ══════════════════════════════════════════════════════
+# NexusIQ —render.yaml
+# Render.com deployment configuration
+#
+# Place this file at the ROOT of your repository.
+# Render auto-detects it for Blueprint deployments.
+# ══════════════════════════════════════════════════════
+
+services:
+  # ── FastAPI Backend ──────────────────────────────────
+  - type: web
+    name: nexusiq-backend
+    env: python
+    region: oregon         # or: frankfurt, singapore, ohio
+    plan: starter          # free: starter | paid: standard
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /ready
+    autoDeploy: true
+
+    # Persistent disk for ChromaDB + uploads + model cache
+    disk:
+      name: nexusiq-data
+      mountPath: /data
+      sizeGB: 10           # increase for large document collections
+
+    envVars:
+      # ── Required (set in Render Dashboard, not here) ──
+      - key: GROQ_API_KEY
+        sync: false        # never commit — set manually in Render Dashboard
+
+      # ── App config ────────────────────────────────────
+      - key: APP_ENV
+        value: production
+      - key: APP_VERSION
+        value: "1.0.0"
+      - key: LOG_LEVEL
+        value: WARNING     # production: WARNING or ERROR
+
+      # ── LLM ───────────────────────────────────────────
+      - key: GROQ_MODEL
+        value: llama-3.1-8b-instant
+      - key: GROQ_MAX_TOKENS
+        value: "1200"
+
+      # ── Embeddings ────────────────────────────────────
+      - key: EMBEDDING_MODEL
+        value: BAAI/bge-small-en
+      - key: EMBEDDING_DEVICE
+        value: cpu
+
+      # ── Paths (using Render Disk mount) ───────────────
+      - key: CHROMA_PERSIST_DIR
+        value: /data/chroma
+      - key: UPLOAD_DIR
+        value: /data/uploads
+      - key: MODEL_CACHE_DIR
+        value: /data/model_cache
+
+      # ── HuggingFace cache on persistent disk ──────────
+      - key: HF_HOME
+        value: /data/model_cache
+      - key: TRANSFORMERS_CACHE
+        value: /data/model_cache
+
+      # ── CORS: set to your Vercel frontend URL ─────────
+      - key: ALLOWED_ORIGINS
+        value: "https://nexusiq.vercel.app,http://localhost:5173"
+
+      # ── Retrieval ─────────────────────────────────────
+      - key: TOP_K
+        value: "6"
+      - key: RERANKER_ENABLED
+        value: "true"
