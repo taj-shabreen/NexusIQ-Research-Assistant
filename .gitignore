@@ -1,0 +1,123 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+
+# =========================
+# Environment Variables
+# =========================
+.env
+.env.local
+.env.production
+.env.development
+
+backend/.env
+frontend/.env
+
+# =========================
+# Logs
+# =========================
+*.log
+logs/
+log/
+
+# =========================
+# Testing
+# =========================
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# =========================
+# Build Artifacts
+# =========================
+build/
+dist/
+site/
+
+# =========================
+# React / Vite
+# =========================
+frontend/node_modules/
+frontend/dist/
+
+node_modules/
+dist/
+
+# =========================
+# ChromaDB
+# =========================
+data/chroma/
+backend/data/chroma/
+chroma/
+chromadb/
+
+# =========================
+# Uploaded Documents
+# =========================
+data/uploads/
+backend/data/uploads/
+uploads/
+
+# =========================
+# Model Cache
+# =========================
+data/model_cache/
+backend/data/model_cache/
+.cache/
+huggingface_cache/
+
+# =========================
+# OS Files
+# =========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =========================
+# Temporary Files
+# =========================
+*.tmp
+*.temp
+*.bak
+*.swp
+
+# =========================
+# LangSmith
+# =========================
+.langsmith/
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# Deployment Secrets
+# =========================
+.env.*
+!.env.example
+
+# =========================
+# Runtime Data
+# =========================
+*.db
+*.sqlite
+*.sqlite3
