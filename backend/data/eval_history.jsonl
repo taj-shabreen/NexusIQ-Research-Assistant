@@ -1,0 +1,9 @@
+{"timestamp": "2026-05-21T11:30:54.123015+00:00", "metrics": {"faithfulness": 0.0, "answer_relevancy": 0.0, "context_precision": 0.0, "context_recall": null, "answer_correctness": null}}
+{"timestamp": "2026-05-21T11:35:22.556674+00:00", "metrics": {"faithfulness": 0.0, "answer_relevancy": 0.0, "context_precision": 0.0, "context_recall": null, "answer_correctness": null}}
+{"timestamp": "2026-05-21T13:26:30.604990+00:00", "metrics": {"faithfulness": 0.0, "answer_relevancy": 0.0, "context_precision": 0.0, "context_recall": null, "answer_correctness": null}}
+{"timestamp": "2026-05-23T08:58:25.908337+00:00", "metrics": {"faithfulness": 0.9, "answer_relevancy": 0.9, "context_precision": 1.0, "context_recall": 0.8667, "answer_correctness": 0.691}}
+{"timestamp": "2026-05-23T09:01:30.382822+00:00", "metrics": {"faithfulness": 1.0, "answer_relevancy": 0.5, "context_precision": 0.5, "context_recall": 0.3571, "answer_correctness": 0.5378}}
+{"timestamp": "2026-05-31T13:04:44.881296+00:00", "metrics": {"faithfulness": 0.7, "answer_relevancy": 0.9, "context_precision": 1.0, "context_recall": 0.3571, "answer_correctness": 0.6559}}
+{"timestamp": "2026-05-31T14:13:50.249755+00:00", "metrics": {"faithfulness": 0.9, "answer_relevancy": 0.8, "context_precision": 1.0, "context_recall": 0.3055, "answer_correctness": 0.7637}}
+{"timestamp": "2026-05-31T14:19:41.138601+00:00", "metrics": {"faithfulness": 0.7, "answer_relevancy": 0.8, "context_precision": 1.0, "context_recall": 0.3571, "answer_correctness": 0.6533}}
+{"timestamp": "2026-05-31T15:37:55.388615+00:00", "metrics": {"faithfulness": 0.7, "answer_relevancy": 0.8, "context_precision": 1.0, "context_recall": 0.3571, "answer_correctness": 0.6446}}
