@@ -163,6 +163,7 @@ def create_app() -> FastAPI:
     )
 
     # ── CORS ───────────────────────────────────────────────────────
+    logger.info("ALLOWED_ORIGINS loaded: %s", settings.allowed_origins)
     _app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.allowed_origins,
