@@ -51,11 +51,20 @@ class Settings:
         self.model_cache_dir: str = os.getenv("MODEL_CACHE_DIR", "./data/model_cache")
 
         # ── Retrieval ─────────────────────────────────────────────────
-        self.top_k:             int  = int(os.getenv("TOP_K", "6"))
-        self.multi_query_count: int  = int(os.getenv("MULTI_QUERY_COUNT", "3"))
-        self.reranker_model:    str  = os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
-        self.reranker_enabled:  bool = os.getenv("RERANKER_ENABLED", "true").lower() == "true"
+        self.chunk_size: int = int(os.getenv("CHUNK_SIZE", "512"))
+        self.chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "64"))
 
+        self.top_k: int = int(os.getenv("TOP_K", "6"))
+        self.multi_query_count: int = int(os.getenv("MULTI_QUERY_COUNT", "3"))
+
+        self.reranker_model: str = os.getenv(
+            "RERANKER_MODEL",
+            "cross-encoder/ms-marco-MiniLM-L-6-v2"
+        )
+
+        self.reranker_enabled: bool = (
+                os.getenv("RERANKER_ENABLED", "true").lower() == "true"
+        )
         # ── App ───────────────────────────────────────────────────────
         self.log_level:   str = os.getenv("LOG_LEVEL",   "INFO").upper()
         self.app_env:     str = os.getenv("APP_ENV",     "development")
