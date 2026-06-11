@@ -11,7 +11,9 @@
 
 import axios from 'axios'
 
-const BASE = 'http://127.0.0.1:8000'
+const BASE =
+  import.meta.env.VITE_API_URL ||
+  'http://127.0.0.1:8000'
 
 // ── Base client ───────────────────────────────────────────────────
 export const http = axios.create({
