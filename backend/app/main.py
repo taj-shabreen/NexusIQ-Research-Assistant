@@ -1,271 +1,200 @@
 """
-NexusIQ — main.py
+main.py — FastAPI application entry point for NexusIQ.
 
-MEMORY FIX for Render Free Tier (512MB RAM):
+Memory management:
+  - SentenceTransformer (~300MB) is NOT loaded at startup.
+  - It loads lazily on the first upload or query request.
+  - This prevents OOM crashes on Render Free Tier (512MB RAM).
 
-ROOT CAUSE:
-  The previous version called `embedding_manager.model` inside the
-  lifespan startup block. This forced SentenceTransformer (BAAI/bge-small-en)
-  to load at startup, consuming ~300MB immediately — crashing Render Free Tier
-  before a single request was ever handled.
-
-FIX:
-  1. Removed the embedding warm-up block from startup entirely.
-     SentenceTransformer now loads lazily on the FIRST actual upload/query.
-  2. Removed the reranker warm-up (CrossEncoder loads lazily too).
-  3. _READINESS["embeddings"] is now set based on config validity only
-     (is the model name configured?) NOT on whether the model is loaded.
-  4. /health and /ready respond instantly — no model loading triggered.
-  5. Startup RAM usage drops from ~350MB to ~80MB, well within 512MB.
-
-BEHAVIOUR:
-  - Startup: fast, low memory (~80MB)
-  - First upload: SentenceTransformer loads once (~300MB, one-time cost)
-  - Subsequent requests: model already in memory, instant
-  - Local dev: identical behaviour — lazy loading works the same way
+Readiness:
+  - /ready returns subsystem status without loading models.
+  - Frontend polls /ready until all non-embedding subsystems are up.
+  - "embeddings" subsystem becomes ready after first upload/query.
 """
+from __future__ import annotations
 
+import json
 import logging
 import time
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Dict
+from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
 
 from app.config import settings
 
-# ── Logging ────────────────────────────────────────────────────────
+# ── Logging ───────────────────────────────────────────────────────────────────
+
 logging.basicConfig(
-    level=getattr(logging, settings.log_level, logging.INFO),
+    level=settings.log_level,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("nexusiq")
 
-# ── Global readiness state ─────────────────────────────────────────
-_READINESS: Dict[str, bool] = {
-    "vectordb":   False,
-    "embeddings": False,   # True = model name is configured (NOT that model is loaded)
-    "llm":        False,
-    "uploads":    False,
+# ── Readiness state ───────────────────────────────────────────────────────────
+# Shared mutable dict — subsystem name → bool
+_READINESS: dict[str, bool] = {
+    "uploads": False,
+    "vectordb": False,
+    "embeddings": False,  # becomes True after first embed call
+    "groq": False,
 }
-_STARTUP_TIME: float = 0.0
-_STARTUP_ERROR: str  = ""
 
 
-def _all_ready() -> bool:
-    return all(_READINESS.values())
+# ── Request logging middleware ────────────────────────────────────────────────
+
+class RequestLogMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        start = time.perf_counter()
+        response = await call_next(request)
+        dur = (time.perf_counter() - start) * 1000
+        logger.debug(
+            "%s %s → %d  (%.1fms)",
+            request.method,
+            request.url.path,
+            response.status_code,
+            dur,
+        )
+        return response
 
 
-# ── Lifespan ───────────────────────────────────────────────────────
+# ── Lifespan ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """
-    Startup: only initialise lightweight components.
-    Heavy models (SentenceTransformer, CrossEncoder) are NOT loaded here.
-    They load lazily on first use.
-    """
-    global _STARTUP_TIME, _STARTUP_ERROR
-    t0 = time.monotonic()
-
+async def lifespan(app: FastAPI):
     logger.info(
         "🚀 NexusIQ starting | env=%s | model=%s",
-        settings.app_env, settings.groq_model,
+        settings.app_env,
+        settings.groq_model,
     )
 
-    # ── 1. Upload directory (lightweight) ─────────────────────────
-    try:
-        from pathlib import Path
-        Path(settings.upload_dir).mkdir(parents=True, exist_ok=True)
-        _READINESS["uploads"] = True
-        logger.info("  Uploads dir ready ✓ — %s", settings.upload_dir)
-    except Exception as exc:
-        _STARTUP_ERROR = f"Upload dir: {exc}"
-        logger.error("  Upload dir failed: %s", exc)
+    errors: list[str] = []
 
-    # ── 2. ChromaDB (lightweight — just creates the client) ────────
-    # This does NOT load any embedding model. ChromaDB with
-    # PersistentClient only reads/writes HNSW index files.
+    # 1. Upload directory
     try:
-        from app.rag.vectorstore import get_or_create_collection
-        collection = get_or_create_collection()
-        count      = collection.count()
-        _READINESS["vectordb"] = True
-        logger.info("  ChromaDB ready ✓ — vectors=%d", count)
+        upload_path = Path(settings.upload_dir)
+        upload_path.mkdir(parents=True, exist_ok=True)
+        _READINESS["uploads"] = True
+        logger.info("  Uploads ready ✓ — %s", settings.upload_dir)
     except Exception as exc:
-        _STARTUP_ERROR = f"ChromaDB: {exc}"
+        errors.append("uploads")
+        logger.error("  Uploads failed: %s", exc)
+
+    # 2. ChromaDB — initialise collection WITHOUT loading embeddings
+    try:
+        from app.rag.vectorstore import get_vectorstore  # noqa: PLC0415
+        vs = get_vectorstore()
+        count = vs.collection.count()
+        _READINESS["vectordb"] = True
+        logger.info("  ChromaDB ready ✓ — %d chunks indexed", count)
+    except Exception as exc:
+        errors.append("vectordb")
         logger.error("  ChromaDB failed: %s", exc)
 
-    # ── 3. Embedding model config check (NOT loading the model) ────
-    # We only verify the model name is configured.
-    # SentenceTransformer loads lazily on first embed_documents() call.
-    # MEMORY FIX: do NOT call embedding_manager.model here.
+    # 3. Groq — verify API key is present (no network call at startup)
     try:
-        if settings.embedding_model and len(settings.embedding_model) > 2:
-            _READINESS["embeddings"] = True
+        if settings.groq_api_key:
+            _READINESS["groq"] = True
             logger.info(
-                "  Embedding config ready ✓ — model=%s (loads on first use)",
-                settings.embedding_model,
+                "  Groq key ready ✓ — model=%s", settings.groq_model
             )
         else:
-            _STARTUP_ERROR = "EMBEDDING_MODEL not configured"
-            logger.error("  Embedding model name missing in config")
+            errors.append("groq")
+            logger.error("  Groq API key is missing")
     except Exception as exc:
-        _STARTUP_ERROR = f"Embedding config: {exc}"
-        logger.error("  Embedding config check failed: %s", exc)
+        errors.append("groq")
+        logger.error("  Groq check failed: %s", exc)
 
-    # ── 4. Groq API key check (no network call, just validates key) ─
-    try:
-        if settings.groq_api_key and len(settings.groq_api_key) > 10:
-            _READINESS["llm"] = True
-            logger.info("  Groq key ready ✓ — model=%s", settings.groq_model)
-        else:
-            _STARTUP_ERROR = "GROQ_API_KEY missing"
-            logger.error("  Groq API key missing or too short")
-    except Exception as exc:
-        _STARTUP_ERROR = f"Groq config: {exc}"
-        logger.error("  Groq config check failed: %s", exc)
+    # NOTE: embeddings subsystem is intentionally NOT loaded here.
+    # SentenceTransformer (~300MB) loads lazily on first upload/query.
+    # This is critical for Render Free Tier (512MB RAM limit).
+    logger.info(
+        "  Embeddings: lazy — will load on first upload/query (~300MB)"
+    )
 
-    # ── NOTE: Reranker (CrossEncoder) is NOT initialised here ──────
-    # It loads lazily via @lru_cache in retriever.py on first rerank call.
-
-    _STARTUP_TIME = time.monotonic() - t0
-    not_ready     = [k for k, v in _READINESS.items() if not v]
-
-    if _all_ready():
-        logger.info(
-            "✅ All systems ready (%.2fs) — models load on first request",
-            _STARTUP_TIME,
-        )
+    if errors:
+        logger.error("❌ Startup errors — not ready: %s", errors)
     else:
-        logger.error("❌ Startup errors — not ready: %s", not_ready)
+        logger.info("✅ All systems ready (embeddings load on demand)")
 
     yield
 
-    # ── Shutdown ───────────────────────────────────────────────────
-    logger.info("🛑 Shutting down")
-    for k in _READINESS:
-        _READINESS[k] = False
+    logger.info("NexusIQ shutting down")
 
 
-# ── Application factory ────────────────────────────────────────────
+# ── App factory ───────────────────────────────────────────────────────────────
 
-def create_app() -> FastAPI:
-    _app = FastAPI(
-        title="NexusIQ API",
-        version=settings.app_version,
-        docs_url="/docs"   if not settings.is_production else None,
-        redoc_url="/redoc" if not settings.is_production else None,
-        lifespan=lifespan,
+app = FastAPI(
+    title="NexusIQ Research AI",
+    description="Multi-document RAG research assistant",
+    version="1.0.0",
+    lifespan=lifespan,
+    docs_url="/docs" if settings.debug else None,
+    redoc_url="/redoc" if settings.debug else None,
+)
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Request logging (dev only to keep prod logs clean)
+if settings.debug:
+    app.add_middleware(RequestLogMiddleware)
+
+
+# ── Routers ───────────────────────────────────────────────────────────────────
+
+from app.api import documents, query, evaluation, debug, visitors  # noqa: E402
+
+app.include_router(documents.router, prefix="/api")
+app.include_router(query.router, prefix="/api")
+app.include_router(evaluation.router, prefix="/api")
+app.include_router(debug.router, prefix="/api")
+app.include_router(visitors.router, prefix="/api")
+
+
+# ── Health & readiness endpoints ──────────────────────────────────────────────
+
+@app.get("/health", tags=["system"])
+async def health():
+    return {
+        "status": "ok",
+        "env": settings.app_env,
+        "model": settings.groq_model,
+    }
+
+
+@app.get("/ready", tags=["system"])
+async def ready():
+    """
+    Returns per-subsystem readiness.
+    Frontend polls this until ready=True.
+
+    Note: embeddings starts False and becomes True after first embed call.
+    The application is usable as soon as uploads + vectordb + groq are ready.
+    """
+    # Consider ready when core subsystems are up (embeddings loads on demand)
+    core_ready = all(
+        _READINESS.get(s, False) for s in ("uploads", "vectordb", "groq")
     )
-
-    # ── CORS ───────────────────────────────────────────────────────
-    logger.info("ALLOWED_ORIGINS loaded: %s", settings.allowed_origins)
-    _app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.allowed_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
-    # ── Request logging middleware ─────────────────────────────────
-    @_app.middleware("http")
-    async def _log_requests(request: Request, call_next):
-        t_start  = time.monotonic()
-        response = await call_next(request)
-        duration = round((time.monotonic() - t_start) * 1000, 1)
-        skip = settings.is_production and request.url.path in ("/health", "/ready")
-        if not skip:
-            logger.info(
-                "%s %s → %d (%.1fms)",
-                request.method, request.url.path,
-                response.status_code, duration,
-            )
-        return response
-
-    # ── Routers ────────────────────────────────────────────────────
-    from app.api.documents  import router as documents_router
-    from app.api.query      import router as query_router
-    from app.api.evaluation import router as evaluation_router
-    from app.api.debug      import router as debug_router
-
-    _app.include_router(documents_router,  prefix="/api/documents",  tags=["Documents"])
-    _app.include_router(query_router,      prefix="/api/query",      tags=["Query"])
-    _app.include_router(evaluation_router, prefix="/api/evaluation", tags=["Evaluation"])
-    _app.include_router(debug_router,      prefix="/api/debug",      tags=["Debug"])
-
-    try:
-        from app.api.visitors import router as visitors_router
-        _app.include_router(visitors_router, prefix="/api/visitors", tags=["Visitors"])
-    except ImportError:
-        pass
-
-    # ── Global exception handler ───────────────────────────────────
-    @_app.exception_handler(Exception)
-    async def _global_exc(request: Request, exc: Exception) -> JSONResponse:
-        logger.exception("Unhandled %s on %s: %s", type(exc).__name__, request.url.path, exc)
-        return JSONResponse(
-            status_code=500,
-            content={"detail": "Internal server error.", "path": str(request.url)},
-        )
-
-    # ── /health — always responds instantly, no model loading ──────
-    @_app.get("/health", tags=["Health"])
-    async def health() -> dict:
-        """
-        Lightweight health probe — responds instantly.
-        Does NOT trigger any model loading.
-        """
-        try:
-            from app.rag.vectorstore import get_or_create_collection
-            chunks = get_or_create_collection().count()
-        except Exception:
-            chunks = -1
-
-        from app.rag.embeddings import embedding_manager
-        model_loaded = embedding_manager._model is not None
-
-        return {
-            "status":         "ok" if _all_ready() else "starting",
-            "ready":          _all_ready(),
-            "subsystems":     dict(_READINESS),
-            "startup_time_s": round(_STARTUP_TIME, 2),
-            "startup_error":  _STARTUP_ERROR or None,
-            "version":        settings.app_version,
-            "model":          settings.groq_model,
-            "embed_model":    settings.embedding_model,
-            "embed_loaded":   model_loaded,   # shows if model is in RAM yet
-            "chunks_stored":  chunks,
-            "env":            settings.app_env,
-        }
-
-    # ── /ready — 200 only when all config checks pass ──────────────
-    @_app.get("/ready", tags=["Health"])
-    async def ready() -> JSONResponse:
-        """
-        Readiness probe — responds instantly.
-        Returns 200 when all subsystems are configured.
-        Does NOT trigger any model loading.
-        """
-        if _all_ready():
-            return JSONResponse(status_code=200, content={
-                "ready":       True,
-                "subsystems":  dict(_READINESS),
-                "model":       settings.groq_model,
-                "embed_model": settings.embedding_model,
-            })
-        return JSONResponse(status_code=503, content={
-            "ready":      False,
-            "subsystems": dict(_READINESS),
-            "error":      _STARTUP_ERROR or "Backend still initialising…",
-            "not_ready":  [k for k, v in _READINESS.items() if not v],
-        })
-
-    return _app
+    return {
+        "ready": core_ready,
+        "subsystems": dict(_READINESS),
+    }
 
 
-app: FastAPI = create_app()
+# ── Callback for embeddings subsystem ─────────────────────────────────────────
+# embeddings.py calls this after model loads successfully
+
+def mark_embeddings_ready():
+    _READINESS["embeddings"] = True
+    logger.info("Embeddings subsystem ready ✓")
