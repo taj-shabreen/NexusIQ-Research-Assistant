@@ -1,109 +1,129 @@
 """
-embeddings.py — SentenceTransformer wrapper with TRUE lazy loading.
+NexusIQ — rag/embeddings.py
 
-CRITICAL: The model is NOT loaded at import time or at startup.
-It loads only on the first call to embed_query() or embed_documents().
-This prevents Render Free Tier OOM crashes during startup.
+Embedding layer using sentence-transformers (BAAI/bge-small-en).
 
-After the model loads, it calls main.mark_embeddings_ready() so the
-/ready endpoint reflects the updated state.
+FIX: get_sentence_embedding_dimension() → get_embedding_dimension()
+  sentence-transformers ≥ 3.x renamed this method.
+  The old name still works but throws FutureWarning on every startup.
+  Fix: try new name first, fall back to old name for older installs.
 """
+
 from __future__ import annotations
 
 import logging
-import threading
-from pathlib import Path
+from typing import ClassVar, List
+
+from sentence_transformers import SentenceTransformer
 
 from app.config import settings
 
-logger = logging.getLogger("nexusiq.rag.embeddings")
+logger = logging.getLogger("nexusiq.embeddings")
 
-_LOCK = threading.Lock()
+BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
+
+
+def _get_embedding_dim(model: SentenceTransformer) -> int:
+    """
+    Get embedding dimension — compatible with both old and new
+    sentence-transformers API.
+
+    sentence-transformers < 3.0 : get_sentence_embedding_dimension()
+    sentence-transformers ≥ 3.0 : get_embedding_dimension()
+    """
+    if hasattr(model, "get_embedding_dimension"):
+        return model.get_embedding_dimension()
+    return model.get_sentence_embedding_dimension()   # legacy fallback
 
 
 class EmbeddingManager:
-    def __init__(self) -> None:
-        self._model = None  # NOT loaded yet
-        self._dim: int = 384  # default for bge-small-en
+    """
+    Singleton wrapper around SentenceTransformer (BAAI/bge-small-en).
+    Uses the model directly (not HuggingFaceEmbeddings wrapper) to
+    ensure correct asymmetric BGE embedding:
+      Documents: no prefix
+      Queries:   BGE_QUERY_PREFIX + query
+    """
+
+    _instance: ClassVar[EmbeddingManager | None] = None
+    _model: SentenceTransformer | None = None
+
+    def __new__(cls) -> EmbeddingManager:
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
 
     def _load(self) -> None:
-        """Load SentenceTransformer — called once, on first use."""
         if self._model is not None:
             return
-        with _LOCK:
-            if self._model is not None:  # double-checked locking
-                return
-            logger.info(
-                "Loading embedding model '%s' on device='cpu'",
-                settings.embedding_model,
-            )
-            from sentence_transformers import SentenceTransformer  # noqa: PLC0415
 
-            cache_dir = Path(settings.model_cache_dir)
-            cache_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(
+            "Loading embedding model '%s' on device='%s'",
+            settings.embedding_model,
+            settings.embedding_device,
+        )
 
-            model = SentenceTransformer(
-                settings.embedding_model,
-                cache_folder=str(cache_dir),
-                device="cpu",
-            )
-            self._model = model
+        self._model = SentenceTransformer(
+            settings.embedding_model,
+            device=settings.embedding_device,
+        )
 
-            # Get embedding dimension (compatible with both old and new ST versions)
-            self._dim = self._get_dim(model)
-            logger.info(
-                "Embedding model '%s' loaded ✓ — dim=%d",
-                settings.embedding_model,
-                self._dim,
-            )
-
-            # Notify main that embeddings subsystem is ready
-            try:
-                from app.main import mark_embeddings_ready  # noqa: PLC0415
-                mark_embeddings_ready()
-            except Exception:
-                pass  # Safe to ignore — main may not be imported yet in tests
-
-    @staticmethod
-    def _get_dim(model) -> int:
-        """Get embedding dimension — compatible with sentence-transformers 2.x and 3.x."""
-        try:
-            return model.get_embedding_dimension()
-        except AttributeError:
-            pass
-        try:
-            return model.get_sentence_embedding_dimension()
-        except AttributeError:
-            pass
-        # Fallback: run a tiny embed
-        try:
-            return len(model.encode("test"))
-        except Exception:
-            return 384
+        # FIX: use _get_embedding_dim() helper — no more FutureWarning
+        dim = _get_embedding_dim(self._model)
+        logger.info(
+            "Embedding model '%s' loaded ✓ — dim=%d",
+            settings.embedding_model,
+            dim,
+        )
 
     @property
-    def model(self):
+    def model(self) -> SentenceTransformer:
         self._load()
+        assert self._model is not None
         return self._model
 
-    @property
-    def dim(self) -> int:
-        return self._dim
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        """Embed document chunks — NO BGE prefix (correct for indexing)."""
+        if not texts:
+            return []
 
-    def embed_query(self, text: str) -> list[float]:
-        """Embed a single query string (BGE uses a query prefix)."""
-        self._load()
-        # BGE models expect a query prefix for retrieval tasks
-        prefixed = f"Represent this sentence for searching relevant passages: {text}"
-        return self._model.encode(prefixed, normalize_embeddings=True).tolist()
+        vectors = self.model.encode(
+            texts,
+            batch_size=settings.embedding_batch_size,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+        )
 
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        """Embed a list of document strings (no prefix for documents)."""
-        self._load()
-        return self._model.encode(
-            texts, normalize_embeddings=True, batch_size=32, show_progress_bar=False
-        ).tolist()
+        logger.debug(
+            "Document embeddings: count=%d dim=%d",
+            len(vectors), vectors.shape[1] if len(vectors) > 0 else 0,
+        )
+        return vectors.tolist()
+
+    def embed_query(self, query: str) -> List[float]:
+        """Embed a search query — WITH BGE prefix (correct for retrieval)."""
+        prefixed = BGE_QUERY_PREFIX + query.strip()
+        vector   = self.model.encode(
+            prefixed,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+        )
+        return vector.tolist()
+
+    def embed_queries(self, queries: List[str]) -> List[List[float]]:
+        """Embed multiple queries in one batch."""
+        if not queries:
+            return []
+        prefixed = [BGE_QUERY_PREFIX + q.strip() for q in queries]
+        vectors  = self.model.encode(
+            prefixed,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+        )
+        return vectors.tolist()
 
 
-# Module-level singleton
 embedding_manager = EmbeddingManager()

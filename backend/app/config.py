@@ -48,27 +48,40 @@ class Settings:
 
         # ── File system ───────────────────────────────────────────────
         self.upload_dir:      str = os.getenv("UPLOAD_DIR",      "./data/uploads")
-        self.model_cache_dir: str = os.getenv("MODEL_CACHE_DIR", "./data/model_cache")
+        self.model_cache_dir:     str = os.getenv("MODEL_CACHE_DIR",     "./data/model_cache")
+        self.eval_history_path:   str = os.getenv("EVAL_HISTORY_PATH",  "./data/eval_history.jsonl")
+        self.visitor_log_path:    str = os.getenv("VISITOR_LOG_PATH",   "./data/visitors.jsonl")
 
         # ── Retrieval ─────────────────────────────────────────────────
-        self.chunk_size: int = int(os.getenv("CHUNK_SIZE", "512"))
+        self.chunk_size:    int = int(os.getenv("CHUNK_SIZE",    "512"))
         self.chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "64"))
 
-        self.top_k: int = int(os.getenv("TOP_K", "6"))
-        self.multi_query_count: int = int(os.getenv("MULTI_QUERY_COUNT", "3"))
+        self.top_k:              int = int(os.getenv("TOP_K",              "6"))
+        self.multi_query_count:  int = int(os.getenv("MULTI_QUERY_COUNT",  "3"))
 
         self.reranker_model: str = os.getenv(
             "RERANKER_MODEL",
             "cross-encoder/ms-marco-MiniLM-L-6-v2"
         )
-
         self.reranker_enabled: bool = (
-                os.getenv("RERANKER_ENABLED", "true").lower() == "true"
+            os.getenv("RERANKER_ENABLED", "true").lower() == "true"
         )
+
         # ── App ───────────────────────────────────────────────────────
         self.log_level:   str = os.getenv("LOG_LEVEL",   "INFO").upper()
         self.app_env:     str = os.getenv("APP_ENV",     "development")
         self.app_version: str = os.getenv("APP_VERSION", "1.0.0")
+
+        # ── Convenience ───────────────────────────────────────────────
+        self.debug: bool = self.app_env.lower() != "production"
+
+        # ── Extended retrieval (optional, used by future features) ──────
+        self.max_upload_size_mb:         int   = int(os.getenv("MAX_UPLOAD_SIZE_MB",          "50"))
+        self.top_k_vector:               int   = int(os.getenv("TOP_K_VECTOR",                "10"))
+        self.top_k_bm25:                 int   = int(os.getenv("TOP_K_BM25",                  "10"))
+        self.top_k_rerank:               int   = int(os.getenv("TOP_K_RERANK",                 "6"))
+        self.confidence_threshold:       float = float(os.getenv("CONFIDENCE_THRESHOLD",     "0.25"))
+        self.retrieval_fetch_multiplier: int   = int(os.getenv("RETRIEVAL_FETCH_MULTIPLIER",   "4"))
 
         # ── CORS ──────────────────────────────────────────────────────
         raw_origins = os.getenv(
@@ -91,14 +104,12 @@ class Settings:
         self.langchain_tracing: bool = _tracing_enabled
 
         # FIX: Alias restored — langsmith_tracer.py uses langchain_tracing_v2
-        # The deployment rewrite removed this alias causing AttributeError.
-        # Both names point to the same value.
         self.langchain_tracing_v2: bool = _tracing_enabled
 
         # ── HuggingFace cache ─────────────────────────────────────────
         if self.model_cache_dir:
-            os.environ.setdefault("HF_HOME",            self.model_cache_dir)
-            os.environ.setdefault("TRANSFORMERS_CACHE",  self.model_cache_dir)
+            os.environ.setdefault("HF_HOME",           self.model_cache_dir)
+            os.environ.setdefault("TRANSFORMERS_CACHE", self.model_cache_dir)
 
         # ── Ensure data directories exist ─────────────────────────────
         for dir_path in [self.chroma_persist_dir, self.upload_dir, self.model_cache_dir]:
@@ -136,7 +147,6 @@ class Settings:
                     load_dotenv(candidate, override=False)
                     return
         except ImportError:
-            # python-dotenv not installed — use manual parser
             for candidate in candidates:
                 if candidate.exists():
                     Settings._parse_dotenv_manually(candidate)
