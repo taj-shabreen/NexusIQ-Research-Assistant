@@ -22,8 +22,8 @@ export function useDocuments() {
     setFetching(true)
     try {
       const res = await documentsApi.list()
-      // Normalise: backend returns { id, filename, chunks, status }
-      setDocuments(res.data ?? [])
+
+      setDocuments(res.data?.documents ?? [])
     } catch (err) {
       console.error('[useDocuments] fetch error:', err.message)
     } finally {
