@@ -25,7 +25,7 @@ from typing import List, Optional, Tuple
 
 from langchain_core.documents import Document
 from rank_bm25 import BM25Okapi
-from sentence_transformers import CrossEncoder
+
 
 from app.config import settings
 from app.rag.embeddings import embedding_manager
@@ -37,8 +37,9 @@ logger = logging.getLogger("nexusiq.retriever")
 # ── Cross-encoder singleton ────────────────────────────────────────
 
 @lru_cache(maxsize=1)
-def _get_reranker() -> CrossEncoder:
+def _get_reranker():
     logger.info("Loading cross-encoder '%s'…", settings.reranker_model)
+    from sentence_transformers import CrossEncoder
     model = CrossEncoder(settings.reranker_model)
     logger.info("Cross-encoder ready ✓")
     return model
