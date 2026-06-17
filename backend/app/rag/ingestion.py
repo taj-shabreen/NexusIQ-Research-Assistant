@@ -108,23 +108,45 @@ async def ingest_document(pdf_path: str, filename: str) -> int:
             logger.info("Deleted %d stale chunks for %s", len(old_ids), filename)
     except Exception:
         pass
-
     # Batch size 8 reduces peak RAM during encode on Render Free Tier (512MB)
+
     import functools
-    _embed = functools.partial(embedding_manager.embed_documents_batched, chunks, batch_size=8)
+
+    _embed = functools.partial(
+        embedding_manager.embed_documents_batched,
+        chunks,
+        batch_size=8
+    )
+
+    logger.info("Starting embeddings for %d chunks", len(chunks))
+
     embeddings = await loop.run_in_executor(None, _embed)
 
-    ids       = [str(uuid.uuid4()) for _ in chunks]
+    logger.info("Embeddings completed")
+
+    ids = [str(uuid.uuid4()) for _ in chunks]
+
     metadatas = [
         {
-            "filename":    filename,
+            "filename": filename,
             "chunk_index": i,
             "chunk_count": len(chunks),
-            "page":        i,
+            "page": i,
         }
         for i in range(len(chunks))
     ]
 
-    collection.add(ids=ids, documents=chunks, embeddings=embeddings, metadatas=metadatas)
+    logger.info("Adding chunks to Chroma")
+
+    collection.add(
+        ids=ids,
+        documents=chunks,
+        embeddings=embeddings,
+        metadatas=metadatas,
+    )
+
+    logger.info("Chroma add completed")
+
     logger.info("Stored %d chunks for %s", len(chunks), filename)
+
     return len(chunks)
