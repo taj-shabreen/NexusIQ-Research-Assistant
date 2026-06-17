@@ -27,7 +27,6 @@
 
 <br/>
 
-[**Live Demo**](#) · [**Documentation**](#-table-of-contents) · [**Report Bug**](../../issues) · [**Request Feature**](../../issues)
 
 </div>
 
