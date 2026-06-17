@@ -37,10 +37,14 @@ class Settings:
         self.groq_model:      str = os.getenv("GROQ_MODEL",      "llama-3.1-8b-instant")
         self.groq_max_tokens: int = int(os.getenv("GROQ_MAX_TOKENS", "1200"))
 
-        # ── Embeddings ────────────────────────────────────────────────
         self.embedding_model = os.getenv(
             "EMBEDDING_MODEL",
             "sentence-transformers/all-MiniLM-L6-v2"
+        )
+
+        self.embedding_device = os.getenv(
+            "EMBEDDING_DEVICE",
+            "cpu"
         )
 
         self.embedding_batch_size = int(
