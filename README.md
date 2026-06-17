@@ -272,8 +272,10 @@ nexusiq/
 
 <br/><br/>
 
-### Retrieval Debugger
+### Metrics-RAGAS
 <img src="screenshots/6.png" alt="Retrieval Debugger" width="850"/>
+
+<br/><br/>
 
 ### Retrieval Debugger
 <img src="screenshots/5.png" alt="Retrieval Debugger" width="850"/>
