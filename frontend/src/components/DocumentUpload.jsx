@@ -37,7 +37,9 @@ export default function DocumentUpload({ onUploaded }) {
     setRetryMsg(null)
 
     const form = new FormData()
-    accepted.forEach(f => form.append('files', f))
+
+    // backend expects "file"
+    form.append('file', accepted[0])
 
     try {
       const res = await documentsApi.upload(form, (evt) => {
