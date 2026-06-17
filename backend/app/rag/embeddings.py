@@ -12,9 +12,9 @@ FIX: get_sentence_embedding_dimension() → get_embedding_dimension()
 from __future__ import annotations
 
 import logging
+import threading
 from typing import ClassVar, List
 
-from sentence_transformers import SentenceTransformer
 
 from app.config import settings
 
@@ -23,7 +23,7 @@ logger = logging.getLogger("nexusiq.embeddings")
 BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 
 
-def _get_embedding_dim(model: SentenceTransformer) -> int:
+def _get_embedding_dim(model) -> int:
     """
     Get embedding dimension — compatible with both old and new
     sentence-transformers API.
@@ -33,7 +33,7 @@ def _get_embedding_dim(model: SentenceTransformer) -> int:
     """
     if hasattr(model, "get_embedding_dimension"):
         return model.get_embedding_dimension()
-    return model.get_sentence_embedding_dimension()   # legacy fallback
+    return model.get_sentence_embedding_dimension()
 
 
 class EmbeddingManager:
@@ -46,9 +46,10 @@ class EmbeddingManager:
     """
 
     _instance: ClassVar[EmbeddingManager | None] = None
-    _model: SentenceTransformer | None = None
+    _model = None  # SentenceTransformer instance — loaded lazily
+    _lock:  ClassVar[threading.Lock] = threading.Lock()
 
-    def __new__(cls) -> EmbeddingManager:
+    def __new__(cls) -> "EmbeddingManager":
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
@@ -56,19 +57,20 @@ class EmbeddingManager:
     def _load(self) -> None:
         if self._model is not None:
             return
+        with self._lock:
+            if self._model is not None:   # double-checked — prevents duplicate loads
+                return
+            from sentence_transformers import SentenceTransformer  # deferred import
+            logger.info(
+                "Loading embedding model '%s' on device='%s'",
+                settings.embedding_model,
+                settings.embedding_device,
+            )
+            self._model = SentenceTransformer(
+                settings.embedding_model,
+                device=settings.embedding_device,
+            )
 
-        logger.info(
-            "Loading embedding model '%s' on device='%s'",
-            settings.embedding_model,
-            settings.embedding_device,
-        )
-
-        self._model = SentenceTransformer(
-            settings.embedding_model,
-            device=settings.embedding_device,
-        )
-
-        # FIX: use _get_embedding_dim() helper — no more FutureWarning
         dim = _get_embedding_dim(self._model)
         logger.info(
             "Embedding model '%s' loaded ✓ — dim=%d",
@@ -77,7 +79,7 @@ class EmbeddingManager:
         )
 
     @property
-    def model(self) -> SentenceTransformer:
+    def model(self):
         self._load()
         assert self._model is not None
         return self._model
@@ -111,6 +113,23 @@ class EmbeddingManager:
             convert_to_numpy=True,
         )
         return vector.tolist()
+
+    def embed_documents_batched(self, texts: List[str], batch_size: int = 8) -> List[List[float]]:
+        """Embed document chunks with explicit batch size for memory control."""
+        if not texts:
+            return []
+        vectors = self.model.encode(
+            texts,
+            batch_size=batch_size,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+        )
+        logger.debug(
+            "Document embeddings (batched): count=%d batch_size=%d dim=%d",
+            len(vectors), batch_size, vectors.shape[1] if len(vectors) > 0 else 0,
+        )
+        return vectors.tolist()
 
     def embed_queries(self, queries: List[str]) -> List[List[float]]:
         """Embed multiple queries in one batch."""
