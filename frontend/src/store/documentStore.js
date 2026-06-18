@@ -34,7 +34,13 @@ export const useDocumentStore = create((set, get) => ({
     set((s) => {
       const existingIds   = new Set(s.documents.map((d) => d.document_id ?? d.id))
       const existingNames = new Set(s.documents.map((d) => d.filename))
-      const fresh         = newDocs.filter((d) => !existingIds.has(d.document_id ?? d.id))
+      const docs = Array.isArray(newDocs)
+         ? newDocs
+         : [newDocs]
+
+      const fresh = docs.filter(
+         (d) => !existingIds.has(d.document_id ?? d.id)
+      )
       const merged        = [...s.documents, ...fresh]
       // Update filename set
       fresh.forEach((d) => { if (d.filename) existingNames.add(d.filename) })

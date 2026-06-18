@@ -54,7 +54,11 @@ export default function DocumentUpload({ onUploaded }) {
         }
       })
 
-      addDocuments(res.data)
+      addDocuments(
+         Array.isArray(res.data)
+            ? res.data
+            : [res.data]
+      )
       setJustDone(true)
       setProgress(0)
       setRetryMsg(null)
