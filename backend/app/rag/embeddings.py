@@ -105,8 +105,8 @@ class EmbeddingManager:
                 exc.response.status_code, exc.response.text[:300],
             )
             raise RuntimeError(
-                f"Jina embeddings API error ({exc.response.status_code}). "
-                "Check JINA_API_KEY validity and remaining free-tier quota."
+                f"Jina embeddings API error ({exc.response.status_code}): "
+                f"{exc.response.text}"
             ) from exc
         except httpx.RequestError as exc:
             logger.error("Jina embeddings API request failed: %s", exc)
