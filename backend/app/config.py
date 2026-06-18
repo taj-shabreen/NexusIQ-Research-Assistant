@@ -32,24 +32,17 @@ class Settings:
 
         # ── Required ──────────────────────────────────────────────────
         self.groq_api_key: str = self._require("GROQ_API_KEY")
+        self.jina_api_key: str = self._require("JINA_API_KEY")
 
         # ── LLM ───────────────────────────────────────────────────────
         self.groq_model:      str = os.getenv("GROQ_MODEL",      "llama-3.1-8b-instant")
         self.groq_max_tokens: int = int(os.getenv("GROQ_MAX_TOKENS", "1200"))
 
-        self.embedding_model = os.getenv(
-            "EMBEDDING_MODEL",
-            "sentence-transformers/all-MiniLM-L6-v2"
-        )
+        # ── Embeddings (Jina AI API — free tier, no local model, no torch) ──
+        self.embedding_model:      str = os.getenv("EMBEDDING_MODEL",       "jina-embeddings-v3")
+        self.embedding_device:     str = os.getenv("EMBEDDING_DEVICE",      "cpu")   # unused by Jina embeddings; kept for compat
+        self.embedding_batch_size: int = int(os.getenv("EMBEDDING_BATCH_SIZE", "50"))
 
-        self.embedding_device = os.getenv(
-            "EMBEDDING_DEVICE",
-            "cpu"
-        )
-
-        self.embedding_batch_size = int(
-            os.getenv("EMBEDDING_BATCH_SIZE", "4")
-        )
         # ── ChromaDB ──────────────────────────────────────────────────
         self.chroma_collection:  str = os.getenv("CHROMA_COLLECTION",  "nexusiq_docs")
         self.chroma_persist_dir: str = os.getenv("CHROMA_PERSIST_DIR", "./data/chroma")

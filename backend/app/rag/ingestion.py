@@ -109,26 +109,25 @@ async def ingest_document(pdf_path: str, filename: str) -> int:
     except Exception:
         pass
 
-    # Batch size 8 reduces peak RAM during encode on Render Free Tier (512MB)
+    # Jina API calls are network I/O, not a local model load — batch_size=50
+    # keeps individual HTTP payloads reasonable without the old memory concerns.
     import functools
     import time
-    _embed = functools.partial(embedding_manager.embed_documents_batched, chunks, batch_size=8)
-    logger.info("About to await run_in_executor for embeddings (this is the suspected hang point)")
+    _embed = functools.partial(embedding_manager.embed_documents_batched, chunks, batch_size=50)
+    logger.info("About to await run_in_executor for embeddings (Jina API call)")
     _t0 = time.monotonic()
     try:
-        embeddings = await asyncio.wait_for(loop.run_in_executor(None, _embed), timeout=120)
+        embeddings = await asyncio.wait_for(loop.run_in_executor(None, _embed), timeout=60)
     except asyncio.TimeoutError:
         logger.error(
-            "Embedding step exceeded 120s timeout after %.1fs elapsed — "
-            "likely a stuck model download or cold start. The underlying "
-            "thread keeps running in the background (Python threads can't "
-            "be force-cancelled), but the request now fails fast instead "
-            "of hanging the HTTP connection.",
+            "Embedding API call exceeded 60s timeout after %.1fs elapsed — "
+            "check JINA_API_KEY validity, remaining free-tier quota, and "
+            "network connectivity to api.jina.ai.",
             time.monotonic() - _t0,
         )
         raise RuntimeError(
-            "Embedding generation timed out — the model may still be downloading "
-            "on first use. Please retry in a minute."
+            "Embedding generation timed out — check your Jina API key, quota, "
+            "and network. Please retry in a minute."
         )
     logger.info("run_in_executor for embeddings RETURNED after %.1fs", time.monotonic() - _t0)
 

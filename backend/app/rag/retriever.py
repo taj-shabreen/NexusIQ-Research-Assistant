@@ -28,7 +28,7 @@ from rank_bm25 import BM25Okapi
 
 
 from app.config import settings
-from app.rag.embeddings import embedding_manager
+from app.rag.embeddings import embedding_manager, EMBEDDING_DIM
 from app.rag.vectorstore import get_or_create_collection
 
 logger = logging.getLogger("nexusiq.retriever")
@@ -200,11 +200,19 @@ def _rerank(
     if not candidates:
         return [], []
 
-    reranker = _get_reranker()
-    pairs    = [(query, doc.page_content) for doc in candidates]
+    pairs = [(query, doc.page_content) for doc in candidates]
 
     try:
+        reranker = _get_reranker()
         scores: List[float] = reranker.predict(pairs).tolist()
+    except ImportError as exc:
+        logger.warning(
+            "Cross-encoder unavailable (%s) — sentence-transformers is not "
+            "installed. Set RERANKER_ENABLED=false to silence this and skip "
+            "reranking cleanly. Returning unranked candidates for now.",
+            exc,
+        )
+        return candidates[:top_k], [0.0] * min(top_k, len(candidates))
     except Exception as exc:
         logger.warning("Cross-encoder failed (%s) — returning unranked", exc)
         return candidates[:top_k], [0.0] * min(top_k, len(candidates))
@@ -359,7 +367,7 @@ async def hybrid_retrieve(
                 try:
                     matched_emb = embedding_manager.embed_query(doc.page_content[:256])
                 except Exception:
-                    matched_emb = [0.0] * 384
+                    matched_emb = [0.0] * EMBEDDING_DIM
             cand_embeddings.append(matched_emb)
 
         candidates = _mmr_rerank(
@@ -456,7 +464,7 @@ async def debug_retrieval(
                 docs.append(doc)
                 seen.add(doc.page_content[:120])
 
-    if method == "hybrid" and docs:
+    if method == "hybrid" and docs and settings.reranker_enabled:
         docs, reranked_scores = _rerank(query, docs, top_k=top_k)
     else:
         docs = docs[:top_k]
