@@ -108,45 +108,41 @@ async def ingest_document(pdf_path: str, filename: str) -> int:
             logger.info("Deleted %d stale chunks for %s", len(old_ids), filename)
     except Exception:
         pass
+
     # Batch size 8 reduces peak RAM during encode on Render Free Tier (512MB)
-
     import functools
+    import time
+    _embed = functools.partial(embedding_manager.embed_documents_batched, chunks, batch_size=8)
+    logger.info("About to await run_in_executor for embeddings (this is the suspected hang point)")
+    _t0 = time.monotonic()
+    try:
+        embeddings = await asyncio.wait_for(loop.run_in_executor(None, _embed), timeout=120)
+    except asyncio.TimeoutError:
+        logger.error(
+            "Embedding step exceeded 120s timeout after %.1fs elapsed — "
+            "likely a stuck model download or cold start. The underlying "
+            "thread keeps running in the background (Python threads can't "
+            "be force-cancelled), but the request now fails fast instead "
+            "of hanging the HTTP connection.",
+            time.monotonic() - _t0,
+        )
+        raise RuntimeError(
+            "Embedding generation timed out — the model may still be downloading "
+            "on first use. Please retry in a minute."
+        )
+    logger.info("run_in_executor for embeddings RETURNED after %.1fs", time.monotonic() - _t0)
 
-    _embed = functools.partial(
-        embedding_manager.embed_documents_batched,
-        chunks,
-        batch_size=8
-    )
-
-    logger.info("Starting embeddings for %d chunks", len(chunks))
-
-    embeddings = await loop.run_in_executor(None, _embed)
-
-    logger.info("Embeddings completed")
-
-    ids = [str(uuid.uuid4()) for _ in chunks]
-
+    ids       = [str(uuid.uuid4()) for _ in chunks]
     metadatas = [
         {
-            "filename": filename,
+            "filename":    filename,
             "chunk_index": i,
             "chunk_count": len(chunks),
-            "page": i,
+            "page":        i,
         }
         for i in range(len(chunks))
     ]
 
-    logger.info("Adding chunks to Chroma")
-
-    collection.add(
-        ids=ids,
-        documents=chunks,
-        embeddings=embeddings,
-        metadatas=metadatas,
-    )
-
-    logger.info("Chroma add completed")
-
+    collection.add(ids=ids, documents=chunks, embeddings=embeddings, metadatas=metadatas)
     logger.info("Stored %d chunks for %s", len(chunks), filename)
-
     return len(chunks)

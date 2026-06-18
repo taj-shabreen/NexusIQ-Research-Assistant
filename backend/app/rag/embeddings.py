@@ -60,15 +60,40 @@ class EmbeddingManager:
         with self._lock:
             if self._model is not None:   # double-checked — prevents duplicate loads
                 return
+            import time
+            import os
             from sentence_transformers import SentenceTransformer  # deferred import
+
+            cache_dir = os.environ.get("HF_HOME") or os.environ.get("TRANSFORMERS_CACHE") or "(default ~/.cache)"
             logger.info(
-                "Loading embedding model '%s' on device='%s'",
+                "Loading embedding model '%s' on device='%s' | cache_dir=%s",
                 settings.embedding_model,
                 settings.embedding_device,
+                cache_dir,
             )
-            self._model = SentenceTransformer(
-                settings.embedding_model,
-                device=settings.embedding_device,
+            t0 = time.monotonic()
+            try:
+                self._model = SentenceTransformer(
+                    settings.embedding_model,
+                    device=settings.embedding_device,
+                )
+            except Exception:
+                logger.exception(
+                    "Embedding model load FAILED after %.1fs — likely a download/network/disk issue",
+                    time.monotonic() - t0,
+                )
+                raise
+            elapsed = time.monotonic() - t0
+            if elapsed > 60:
+                logger.warning(
+                    "Embedding model load took %.1fs (>60s) — this usually means a slow/"
+                    "uncached download. Pre-download the model at build time to avoid "
+                    "this on every cold start.",
+                    elapsed,
+                )
+            logger.info(
+                "SentenceTransformer constructor returned after %.1fs",
+                time.monotonic() - t0,
             )
 
         dim = _get_embedding_dim(self._model)
@@ -118,16 +143,21 @@ class EmbeddingManager:
         """Embed document chunks with explicit batch size for memory control."""
         if not texts:
             return []
-        vectors = self.model.encode(
+        import time
+        logger.info("embed_documents_batched: about to access self.model (triggers load if needed)")
+        model = self.model   # forces _load() here, with its own logging
+        logger.info("embed_documents_batched: model ready, starting encode() for %d texts", len(texts))
+        t0 = time.monotonic()
+        vectors = model.encode(
             texts,
             batch_size=batch_size,
             normalize_embeddings=True,
             show_progress_bar=False,
             convert_to_numpy=True,
         )
-        logger.debug(
-            "Document embeddings (batched): count=%d batch_size=%d dim=%d",
-            len(vectors), batch_size, vectors.shape[1] if len(vectors) > 0 else 0,
+        logger.info(
+            "embed_documents_batched: encode() finished in %.1fs — count=%d batch_size=%d dim=%d",
+            time.monotonic() - t0, len(vectors), batch_size, vectors.shape[1] if len(vectors) > 0 else 0,
         )
         return vectors.tolist()
 
