@@ -227,7 +227,7 @@ def create_app() -> FastAPI:
             chunks = -1
 
         from app.rag.embeddings import embedding_manager
-        model_loaded = embedding_manager._model is not None
+        model_loaded = "jina-api"
 
         return {
             "status":         "ok" if _all_ready() else "starting",
