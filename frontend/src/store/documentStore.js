@@ -32,33 +32,36 @@ export const useDocumentStore = create((set, get) => ({
 
   addDocuments(newDocs) {
     set((s) => {
-      const existingIds   = new Set(s.documents.map((d) => d.document_id ?? d.id))
+      const docs = Array.isArray(newDocs) ? newDocs : [newDocs]
+      // FIX: dedupe by filename, not document_id/id — neither POST /upload
+      // nor GET /api/documents/ ever returns a document_id or id field.
+      // The old code compared `undefined === undefined`, so every upload
+      // after the first was silently dropped as a "duplicate".
       const existingNames = new Set(s.documents.map((d) => d.filename))
-      const docs = Array.isArray(newDocs)
-         ? newDocs
-         : [newDocs]
+      const validDocs      = docs.filter((d) => d?.filename)
 
-      const fresh = docs.filter(
-         (d) => !existingIds.has(d.document_id ?? d.id)
+      // Replace any existing entry with the same filename (re-upload/re-index)
+      // instead of leaving a stale duplicate row next to the new one.
+      const withoutStale = s.documents.filter(
+        (d) => !validDocs.some((nd) => nd.filename === d.filename)
       )
-      const merged        = [...s.documents, ...fresh]
-      // Update filename set
-      fresh.forEach((d) => { if (d.filename) existingNames.add(d.filename) })
+      const merged = [...withoutStale, ...validDocs]
+      validDocs.forEach((d) => existingNames.add(d.filename))
+
       return {
         documents:         merged,
-        uploadedFilenames: existingNames,
+        uploadedFilenames: new Set(merged.map((d) => d.filename).filter(Boolean)),
       }
     })
   },
 
-  removeDocument(documentId) {
+  removeDocument(filename) {
     set((s) => {
-      const doc    = s.documents.find((d) => (d.document_id ?? d.id) === documentId)
-      const names  = new Set(s.uploadedFilenames)
-      if (doc?.filename) names.delete(doc.filename)
+      const names = new Set(s.uploadedFilenames)
+      names.delete(filename)
       return {
-        documents:         s.documents.filter((d) => (d.document_id ?? d.id) !== documentId),
-        selectedDocId:     s.selectedDocId === documentId ? null : s.selectedDocId,
+        documents:         s.documents.filter((d) => d.filename !== filename),
+        selectedDocId:     s.selectedDocId === filename ? null : s.selectedDocId,
         uploadedFilenames: names,
       }
     })

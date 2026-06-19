@@ -3,62 +3,6 @@ NexusIQ — rag/pipeline.py
 
 Production-grade RAG pipeline with intelligent query-type routing
 and strict token budget management.
-
-═══════════════════════════════════════════════════════════════════
-ROOT CAUSES OF 413 TOKEN OVERFLOW — FIXED IN THIS VERSION
-═══════════════════════════════════════════════════════════════════
-
-BUG 1 (PRIMARY): _build_context() used max_chars=14000
-  14000 chars ÷ 4 ≈ 3500 context tokens.
-  _llm_writer had max_tokens=4096.
-  3500 + 4096 = 7596 total → exceeds Groq's ~6000 combined limit → 413.
-  FIX: Token budget system. Reserve tokens for system prompt + answer.
-       Context chars = (budget_tokens - reserved) × CHARS_PER_TOKEN.
-
-BUG 2: _map_reduce_summarize() passed combined[:12000] to reduce LLM
-  12000 chars ÷ 4 = 3000 tokens input.
-  max_tokens=4096 output requested.
-  3000 + 4096 = 7096 → overflow.
-  FIX: Map LLM max_tokens=800 (bullet summaries don't need more).
-       Reduce LLM max_tokens=1500.
-       Reduce input capped at 6000 chars (1500 tokens).
-
-BUG 3: _llm_writer max_tokens=4096 hardcoded
-  Caused overflow when combined with any large context.
-  FIX: Dynamic max_tokens computed per-query from remaining budget.
-
-BUG 4: REVISION_NOTES/INTERVIEW_GUIDE without filename
-  hybrid_retrieve(top_k=20) misses topic-diverse chunks because
-  BM25+semantic scores generic "revision notes" query poorly.
-  Chunks about Strategy, Adapter, Composite, OCL all missed.
-  FIX: Synthesis queries retrieve ALL chunks from collection
-       (sorted by page), then token-budget trims to fit.
-
-BUG 5: MAP groups chunk[:3000] but map LLM max_tokens=4096
-  Even map phase could overflow with verbose system prompt.
-  FIX: Map LLM max_tokens=800, chunk input capped at 2000 chars.
-
-═══════════════════════════════════════════════════════════════════
-TOKEN BUDGET CONSTANTS
-═══════════════════════════════════════════════════════════════════
-
-Groq llama-3.1-8b-instant limits:
-  Context window:  8192 tokens
-  Max output:      8192 tokens
-  Combined budget: ~6000 tokens (conservative safe limit)
-
-Budget allocation:
-  SYSTEM_PROMPT_TOKENS = 400   (reserved for system prompt)
-  ANSWER_TOKENS        = 1800  (reserved for answer generation)
-  CONTEXT_BUDGET       = 6000 - 400 - 1800 = 3800 tokens
-  CHARS_PER_TOKEN      = 3.5   (conservative; English text ~4, code ~3)
-  MAX_CONTEXT_CHARS    = 3800 × 3.5 = 13300 chars → use 12000 for safety
-
-For synthesis queries (revision notes, interview guide):
-  These need richer answers → reduce context, increase answer budget:
-  ANSWER_TOKENS        = 2500
-  CONTEXT_BUDGET       = 6000 - 400 - 2500 = 3100 tokens
-  MAX_CONTEXT_CHARS    = 3100 × 3.5 = 10850 → use 9000 for safety
 """
 
 import asyncio
@@ -78,16 +22,13 @@ from app.rag.retriever import hybrid_retrieve
 
 logger = logging.getLogger("nexusiq.pipeline")
 
-# ── Strict no-answer ───────────────────────────────────────────────
 _NO_ANSWER = "The uploaded documents do not contain enough information to answer this."
 _MIN_CONFIDENCE_THRESHOLD = 0.25
 
-# ── Token budget constants ─────────────────────────────────────────
-_GROQ_SAFE_COMBINED  = 6000   # conservative combined input+output limit
-_SYSTEM_PROMPT_TOKS  = 400    # reserved for system prompt
-_CHARS_PER_TOKEN     = 3.5    # chars per token (conservative)
+_GROQ_SAFE_COMBINED  = 6000
+_SYSTEM_PROMPT_TOKS  = 400
+_CHARS_PER_TOKEN     = 3.5
 
-# Per query-type answer token budget
 _ANSWER_TOKENS: Dict[str, int] = {
     "factual_qa":      1200,
     "summary":         1800,
@@ -98,39 +39,27 @@ _ANSWER_TOKENS: Dict[str, int] = {
     "long_synthesis":  2000,
 }
 
-# Map-reduce specific token limits
-_MAP_CHUNK_GROUP_SIZE  = 4     # chunks per map group (reduced from 5)
-_MAP_MAX_INPUT_CHARS   = 2000  # per map group input (≈570 tokens)
-_MAP_MAX_OUTPUT_TOKENS = 600   # map LLM answer budget
-_REDUCE_MAX_INPUT_CHARS = 5500 # combined map summaries (≈1570 tokens)
-_REDUCE_MAX_OUTPUT_TOKENS = 1500  # reduce LLM answer budget
+_MAP_CHUNK_GROUP_SIZE   = 4
+_MAP_MAX_INPUT_CHARS    = 2000
+_MAP_MAX_OUTPUT_TOKENS  = 600
+_REDUCE_MAX_INPUT_CHARS = 5500
+_REDUCE_MAX_OUTPUT_TOKENS = 1500
 
 
 def _context_char_budget(qt_value: str) -> int:
-    """
-    Compute max context chars for a query type based on token budget.
-    context_tokens = GROQ_SAFE - SYSTEM_PROMPT - ANSWER_TOKENS
-    context_chars  = context_tokens × CHARS_PER_TOKEN
-    Apply 15% safety margin.
-    """
     answer_toks   = _ANSWER_TOKENS.get(qt_value, 1200)
     context_toks  = _GROQ_SAFE_COMBINED - _SYSTEM_PROMPT_TOKS - answer_toks
-    context_chars = int(context_toks * _CHARS_PER_TOKEN * 0.85)   # 15% safety
+    context_chars = int(context_toks * _CHARS_PER_TOKEN * 0.85)
     logger.debug(
         "Token budget | qt=%s | answer=%d | ctx_toks=%d | ctx_chars=%d",
         qt_value, answer_toks, context_toks, context_chars,
     )
-    return max(context_chars, 2000)   # minimum 2000 chars always
+    return max(context_chars, 2000)
 
 
 def _answer_max_tokens(qt_value: str) -> int:
-    """Return the max_tokens to request from the LLM for this query type."""
     return _ANSWER_TOKENS.get(qt_value, 1200)
 
-
-# ══════════════════════════════════════════════════════════════════
-# QUERY TYPE DETECTION
-# ══════════════════════════════════════════════════════════════════
 
 class QueryType(str, Enum):
     FACTUAL_QA      = "factual_qa"
@@ -176,6 +105,7 @@ _QT_PATTERNS: List[Tuple[QueryType, List[str]]] = [
     (QueryType.TABLE, [
         r'\b(create|make|generate|show|list)\s+(a\s+)?table\b',
         r'\bcompare\b.*\b(table|tabular|format)\b',
+        r'\bcompare\b',
         r'\bdifference(s)?\s+between\b',
         r'\bcomparison\s+(of|between)\b',
         r'\bclassif(y|ication)\s+(in\s+)?table\b',
@@ -225,12 +155,6 @@ def detect_filename(question: str) -> Optional[str]:
 
 
 def get_retrieval_params(qt: QueryType) -> Dict[str, Any]:
-    """
-    Retrieval parameters per query type.
-    NOTE: top_k here is used ONLY as a fallback cap when full-collection
-    retrieval is not possible. The actual number of chunks passed to the
-    LLM is capped by the token budget in _build_context().
-    """
     return {
         QueryType.FACTUAL_QA:      {"top_k": 6,  "fetch_k": 24, "enable_reranking": True,  "full_collection": False},
         QueryType.SUMMARY:         {"top_k": 40, "fetch_k": 80, "enable_reranking": False, "full_collection": True},
@@ -242,10 +166,6 @@ def get_retrieval_params(qt: QueryType) -> Dict[str, Any]:
     }.get(qt, {"top_k": 6, "fetch_k": 24, "enable_reranking": True, "full_collection": False})
 
 
-# ══════════════════════════════════════════════════════════════════
-# LLM FACTORY — dynamic max_tokens
-# ══════════════════════════════════════════════════════════════════
-
 def _make_llm(temperature: float = 0.0, max_tokens: int = 1200) -> ChatGroq:
     return ChatGroq(
         api_key=settings.groq_api_key,
@@ -255,25 +175,16 @@ def _make_llm(temperature: float = 0.0, max_tokens: int = 1200) -> ChatGroq:
     )
 
 
-# Static LLMs for rewriting / sub-queries (small outputs)
 _llm_precise  = _make_llm(temperature=0.0, max_tokens=256)
 _llm_creative = _make_llm(temperature=0.3, max_tokens=256)
-
-# Map LLM — small budget per group
 _llm_map      = _make_llm(temperature=0.0, max_tokens=_MAP_MAX_OUTPUT_TOKENS)
-# Reduce LLM — moderate budget for final synthesis
 _llm_reduce   = _make_llm(temperature=0.1, max_tokens=_REDUCE_MAX_OUTPUT_TOKENS)
 
 
 def _make_generation_llm(qt_value: str) -> ChatGroq:
-    """Create a generation LLM with token budget appropriate for query type."""
     max_toks = _answer_max_tokens(qt_value)
     return _make_llm(temperature=0.1, max_tokens=max_toks)
 
-
-# ══════════════════════════════════════════════════════════════════
-# PROMPTS — one per query type
-# ══════════════════════════════════════════════════════════════════
 
 _BASE_SYSTEM_RULES = (
     "STRICT RULES:\n"
@@ -437,16 +348,7 @@ def _get_prompt(qt: QueryType) -> ChatPromptTemplate:
     }.get(qt, _PROMPT_FACTUAL_QA)
 
 
-# ══════════════════════════════════════════════════════════════════
-# FILENAME-AWARE RETRIEVAL
-# ══════════════════════════════════════════════════════════════════
-
-async def _retrieve_by_filename(
-    filename: str,
-    query: str,
-    top_k: int,
-) -> List[Any]:
-    """Semantic retrieval filtered to a specific document filename."""
+async def _retrieve_by_filename(filename: str, query: str, top_k: int) -> List[Any]:
     try:
         from app.rag.vectorstore import get_or_create_collection
         from app.rag.embeddings import embedding_manager
@@ -480,7 +382,6 @@ async def _retrieve_by_filename(
 
 
 async def _retrieve_all_chunks_for_file(filename: str) -> List[Any]:
-    """Retrieve ALL chunks for a file, sorted by chunk_index (page order)."""
     try:
         from app.rag.vectorstore import get_or_create_collection
         from langchain_core.documents import Document
@@ -509,11 +410,6 @@ async def _retrieve_all_chunks_for_file(filename: str) -> List[Any]:
 
 
 async def _retrieve_all_chunks(limit: int = 200) -> List[Any]:
-    """
-    Retrieve ALL chunks from the collection, sorted by document + page order.
-    Used for synthesis queries without a specific filename.
-    This ensures no topic is missed by keyword/semantic scoring.
-    """
     try:
         from app.rag.vectorstore import get_or_create_collection
         from langchain_core.documents import Document
@@ -534,7 +430,6 @@ async def _retrieve_all_chunks(limit: int = 200) -> List[Any]:
                 results["documents"],
                 results.get("metadatas", [{}] * len(results["documents"])),
             ))
-            # Sort by filename + chunk_index so related content is contiguous
             pairs.sort(key=lambda x: (
                 x[1].get("filename", ""),
                 int(x[1].get("chunk_index", 0)),
@@ -548,10 +443,6 @@ async def _retrieve_all_chunks(limit: int = 200) -> List[Any]:
         logger.warning("Full-collection retrieval failed: %s", exc)
         return []
 
-
-# ══════════════════════════════════════════════════════════════════
-# HELPER FUNCTIONS
-# ══════════════════════════════════════════════════════════════════
 
 async def _rewrite_query(question: str) -> str:
     try:
@@ -581,15 +472,6 @@ async def _generate_sub_queries(question: str, n: int) -> List[str]:
 
 
 def _build_context(docs, qt_value: str = "factual_qa") -> str:
-    """
-    Build context string with STRICT token budget enforcement.
-
-    FIX: max_chars now computed dynamically per query type using
-    the token budget formula:
-      context_chars = (GROQ_SAFE - SYSTEM_PROMPT_TOKS - ANSWER_TOKS) × CHARS_PER_TOKEN × 0.85
-
-    This prevents 413 overflow regardless of chunk count or size.
-    """
     if not docs:
         return ""
 
@@ -610,7 +492,7 @@ def _build_context(docs, qt_value: str = "factual_qa") -> str:
             )
             break
         blocks.append(block)
-        total += len(block) + 2   # +2 for separator
+        total += len(block) + 2
 
     context = "\n\n".join(blocks)
     logger.info(
@@ -648,11 +530,7 @@ def _build_citations(docs, reranked_scores: Optional[List[float]] = None) -> Lis
     return citations
 
 
-def _compute_confidence(
-    docs,
-    reranked_scores: Optional[List[float]],
-    top_k: int,
-) -> float:
+def _compute_confidence(docs, reranked_scores: Optional[List[float]], top_k: int) -> float:
     if not docs:
         return 0.0
     coverage = min(len(docs) / max(top_k, 1), 1.0)
@@ -673,32 +551,15 @@ def _is_context_too_weak(reranked_scores: Optional[List[float]]) -> bool:
     return False
 
 
-# ══════════════════════════════════════════════════════════════════
-# MAP-REDUCE SUMMARIZATION — with tight token budgets
-# ══════════════════════════════════════════════════════════════════
-
-async def _map_reduce_summarize(
-    docs: List[Any],
-    question: str,
-) -> str:
-    """
-    Map-Reduce summarization with strict per-phase token limits.
-
-    FIX: Each phase uses its own LLM instance with appropriate max_tokens.
-      Map:    max_tokens=600  — bullet summaries, very concise
-      Reduce: max_tokens=1500 — final synthesis, moderate length
-      Input caps prevent overflow even with many groups.
-    """
+async def _map_reduce_summarize(docs: List[Any], question: str) -> str:
     if not docs:
         return _NO_ANSWER
 
     logger.info(
         "Map-reduce: %d chunks | group=%d | map_max_chars=%d | reduce_max_chars=%d",
-        len(docs), _MAP_CHUNK_GROUP_SIZE,
-        _MAP_MAX_INPUT_CHARS, _REDUCE_MAX_INPUT_CHARS,
+        len(docs), _MAP_CHUNK_GROUP_SIZE, _MAP_MAX_INPUT_CHARS, _REDUCE_MAX_INPUT_CHARS,
     )
 
-    # ── Map phase ─────────────────────────────────────────────────
     groups = [
         docs[i:i + _MAP_CHUNK_GROUP_SIZE]
         for i in range(0, len(docs), _MAP_CHUNK_GROUP_SIZE)
@@ -712,7 +573,6 @@ async def _map_reduce_summarize(
             f"[p.{int(d.metadata.get('page',0))+1}]: {d.page_content.strip()}"
             for d in group
         )
-        # FIX: cap map input at _MAP_MAX_INPUT_CHARS to prevent token overflow
         chunk_text = chunk_text[:_MAP_MAX_INPUT_CHARS]
         try:
             summary = await map_chain.ainvoke({"chunk": chunk_text})
@@ -723,18 +583,15 @@ async def _map_reduce_summarize(
             )
         except Exception as exc:
             logger.warning("Map group %d failed: %s", gi, exc)
-            # Add a placeholder so topic coverage is maintained
             group_summaries.append(f"[Section {gi+1}: summary unavailable]")
 
     if not group_summaries or all("unavailable" in s for s in group_summaries):
         return _NO_ANSWER
 
-    # ── Reduce phase ──────────────────────────────────────────────
     combined = "\n\n---\n\n".join(
         f"[Sec {i+1}]:\n{s}"
         for i, s in enumerate(group_summaries)
     )
-    # FIX: cap reduce input at _REDUCE_MAX_INPUT_CHARS (was 12000 → now 5500)
     combined = combined[:_REDUCE_MAX_INPUT_CHARS]
 
     reduce_chain = _PROMPT_REDUCE | _llm_reduce | StrOutputParser()
@@ -746,17 +603,12 @@ async def _map_reduce_summarize(
         return final.strip()
     except Exception as exc:
         logger.error("Reduce failed: %s — joining map summaries", exc)
-        # Fallback: join the map summaries directly
         return "\n\n".join(
             f"**Section {i+1}:**\n{s}"
             for i, s in enumerate(group_summaries)
             if "unavailable" not in s
         )
 
-
-# ══════════════════════════════════════════════════════════════════
-# MAIN PIPELINE
-# ══════════════════════════════════════════════════════════════════
 
 @traced(name="rag_pipeline")
 async def rag_pipeline(
@@ -766,20 +618,9 @@ async def rag_pipeline(
     enable_reranking: bool = True,
     enable_multi_query: bool = False,
 ) -> Dict[str, Any]:
-    """
-    Intelligent RAG pipeline with query-type routing and token budgeting.
-
-    Key behaviours:
-    - Detects query type → selects retrieval strategy + prompt
-    - Synthesis queries (revision/interview/summary/conclusion) retrieve
-      ALL collection chunks sorted by page order to ensure full coverage
-    - Token budget is computed per query type — never exceeds Groq limits
-    - Map-reduce used for large documents to stay within token limits
-    """
     logger.info("=" * 60)
     logger.info("RAG START | q='%s'", question[:80])
 
-    # ── Step 1: Classify query ─────────────────────────────────────
     qt       = detect_query_type(question)
     filename = detect_filename(question)
     params   = get_retrieval_params(qt)
@@ -793,20 +634,16 @@ async def rag_pipeline(
         qt.value, filename, effective_top_k, use_full_collection, effective_reranking,
     )
 
-    # ── Step 2: Query rewriting (factual only) ─────────────────────
     rewritten = await _rewrite_query(question) if qt == QueryType.FACTUAL_QA else question
 
-    # ── Step 3: Sub-queries (factual only) ─────────────────────────
     sub_queries: List[str] = []
     if enable_multi_query and qt == QueryType.FACTUAL_QA:
         sub_queries = await _generate_sub_queries(rewritten, n=settings.multi_query_count)
 
-    # ── Step 4: Retrieval ──────────────────────────────────────────
     all_docs:        List                  = []
     primary_trace:   Dict                  = {}
     reranked_scores: Optional[List[float]] = None
 
-    # Path A: Summary with specific filename → get ALL chunks for that file
     if qt == QueryType.SUMMARY and filename:
         all_docs = await _retrieve_all_chunks_for_file(filename)
         primary_trace = {
@@ -814,10 +651,6 @@ async def rag_pipeline(
             "merged_count": len(all_docs), "final_count": len(all_docs),
             "reranked": False, "mode": "full_document",
         }
-
-    # Path B: Synthesis without filename → retrieve ALL collection chunks
-    # FIX: This is the critical fix for missing topics (Strategy, Adapter, etc.)
-    # BM25/semantic can't reliably retrieve all topics for generic synthesis queries.
     elif use_full_collection and not filename:
         all_docs = await _retrieve_all_chunks(limit=200)
         primary_trace = {
@@ -825,8 +658,6 @@ async def rag_pipeline(
             "merged_count": len(all_docs), "final_count": len(all_docs),
             "reranked": False, "mode": "full_collection",
         }
-
-    # Path C: Filename mentioned → filter to that file
     elif filename:
         all_docs = await _retrieve_by_filename(filename, rewritten, effective_top_k)
         if all_docs:
@@ -836,7 +667,6 @@ async def rag_pipeline(
                 "reranked": False, "mode": "filename_filtered",
             }
 
-    # Path D: Standard hybrid retrieval (factual QA, table, long_synthesis)
     if not all_docs:
         all_queries = [rewritten] + sub_queries
         tasks       = [
@@ -856,7 +686,6 @@ async def rag_pipeline(
                 reranked_scores = trace.get("reranked_scores")
             all_docs.extend(docs)
 
-    # ── Step 5: Deduplication ──────────────────────────────────────
     seen:   set  = set()
     unique: list = []
     for doc in all_docs:
@@ -865,10 +694,8 @@ async def rag_pipeline(
             seen.add(key)
             unique.append(doc)
 
-    # For synthesis: keep ALL unique docs (token budget trims context later)
-    # For factual: cap at effective_top_k
     if use_full_collection or (qt == QueryType.SUMMARY and filename):
-        final_docs = unique   # token budget handles trimming in _build_context
+        final_docs = unique
     else:
         final_docs = unique[:effective_top_k]
 
@@ -877,7 +704,6 @@ async def rag_pipeline(
         len(all_docs), len(unique), len(final_docs),
     )
 
-    # ── Guard: empty retrieval ─────────────────────────────────────
     if not final_docs:
         logger.error("NO DOCS for '%s'", question[:60])
         return {
@@ -890,7 +716,6 @@ async def rag_pipeline(
             "query_type":       qt.value,
         }
 
-    # ── Guard: weak context (factual QA only) ─────────────────────
     if qt == QueryType.FACTUAL_QA and effective_reranking and _is_context_too_weak(reranked_scores):
         citations  = _build_citations(final_docs, reranked_scores)
         confidence = _compute_confidence(final_docs, reranked_scores, effective_top_k)
@@ -904,7 +729,6 @@ async def rag_pipeline(
             "query_type":       qt.value,
         }
 
-    # ── Step 6: Generation ─────────────────────────────────────────
     answer = ""
     try:
         is_synthesis = qt in (
@@ -915,11 +739,9 @@ async def rag_pipeline(
         )
 
         if is_synthesis and len(final_docs) > _MAP_CHUNK_GROUP_SIZE:
-            # Map-reduce for large doc sets — each phase has its own token budget
             logger.info("Map-reduce | qt=%s | docs=%d", qt.value, len(final_docs))
             answer = await _map_reduce_summarize(final_docs, question)
         else:
-            # Single-pass generation with token-budgeted context
             context     = _build_context(final_docs, qt_value=qt.value)
             history_str = _build_history_str(
                 [
@@ -930,7 +752,6 @@ async def rag_pipeline(
                 ]
             )
 
-            # FIX: create LLM with token budget appropriate for this query type
             llm    = _make_generation_llm(qt.value)
             prompt = _get_prompt(qt)
 
@@ -957,7 +778,6 @@ async def rag_pipeline(
 
     except Exception as exc:
         logger.error("Generation failed: %s", exc, exc_info=True)
-        # Check if it's a token overflow error and return a helpful message
         if "413" in str(exc) or "too large" in str(exc).lower() or "token" in str(exc).lower():
             answer = (
                 "The document is too large to process in one pass. "
@@ -966,8 +786,6 @@ async def rag_pipeline(
         else:
             answer = f"Generation failed: {exc}. Please check your Groq API key."
 
-    # ── Step 7: Citations + confidence ────────────────────────────
-    # For synthesis: cite first N docs that fit in budget
     cite_docs   = final_docs[:min(len(final_docs), effective_top_k)]
     citations   = _build_citations(cite_docs, reranked_scores)
     confidence  = _compute_confidence(cite_docs, reranked_scores, effective_top_k)
