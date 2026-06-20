@@ -348,20 +348,21 @@ def _get_prompt(qt: QueryType) -> ChatPromptTemplate:
     }.get(qt, _PROMPT_FACTUAL_QA)
 
 
-async def _retrieve_by_filename(filename: str, query: str, top_k: int) -> List[Any]:
+async def _retrieve_by_filename(filename: str, query: str, top_k: int, session_id: str) -> List[Any]:
     try:
         from app.rag.vectorstore import get_or_create_collection
         from app.rag.embeddings import embedding_manager
         from langchain_core.documents import Document
 
         collection      = get_or_create_collection()
-        total           = collection.count()
+        session_count   = collection.get(where={"session_id": session_id}, include=[])
+        total           = len(session_count.get("ids") or [])
         query_embedding = embedding_manager.embed_query(query)
 
         results = collection.query(
             query_embeddings=[query_embedding],
             n_results=min(top_k, max(total, 1)),
-            where={"filename": filename},
+            where={"$and": [{"filename": filename}, {"session_id": session_id}]},
             include=["documents", "metadatas", "distances"],
         )
 
@@ -381,14 +382,14 @@ async def _retrieve_by_filename(filename: str, query: str, top_k: int) -> List[A
         return []
 
 
-async def _retrieve_all_chunks_for_file(filename: str) -> List[Any]:
+async def _retrieve_all_chunks_for_file(filename: str, session_id: str) -> List[Any]:
     try:
         from app.rag.vectorstore import get_or_create_collection
         from langchain_core.documents import Document
 
         collection = get_or_create_collection()
         results    = collection.get(
-            where={"filename": filename},
+            where={"$and": [{"filename": filename}, {"session_id": session_id}]},
             include=["documents", "metadatas"],
         )
 
@@ -409,17 +410,19 @@ async def _retrieve_all_chunks_for_file(filename: str) -> List[Any]:
         return []
 
 
-async def _retrieve_all_chunks(limit: int = 200) -> List[Any]:
+async def _retrieve_all_chunks(session_id: str, limit: int = 200) -> List[Any]:
     try:
         from app.rag.vectorstore import get_or_create_collection
         from langchain_core.documents import Document
 
         collection = get_or_create_collection()
-        total      = collection.count()
+        session_probe = collection.get(where={"session_id": session_id}, include=[])
+        total = len(session_probe.get("ids") or [])
         if total == 0:
             return []
 
         results = collection.get(
+            where={"session_id": session_id},
             include=["documents", "metadatas"],
             limit=min(total, limit),
         )
@@ -613,13 +616,14 @@ async def _map_reduce_summarize(docs: List[Any], question: str) -> str:
 @traced(name="rag_pipeline")
 async def rag_pipeline(
     question: str,
+    session_id: str,
     history: List[Any],
     top_k: Optional[int] = None,
     enable_reranking: bool = True,
     enable_multi_query: bool = False,
 ) -> Dict[str, Any]:
     logger.info("=" * 60)
-    logger.info("RAG START | q='%s'", question[:80])
+    logger.info("RAG START | session=%s | q='%s'", session_id, question[:80])
 
     qt       = detect_query_type(question)
     filename = detect_filename(question)
@@ -645,21 +649,21 @@ async def rag_pipeline(
     reranked_scores: Optional[List[float]] = None
 
     if qt == QueryType.SUMMARY and filename:
-        all_docs = await _retrieve_all_chunks_for_file(filename)
+        all_docs = await _retrieve_all_chunks_for_file(filename, session_id)
         primary_trace = {
             "semantic_count": len(all_docs), "bm25_count": 0,
             "merged_count": len(all_docs), "final_count": len(all_docs),
             "reranked": False, "mode": "full_document",
         }
     elif use_full_collection and not filename:
-        all_docs = await _retrieve_all_chunks(limit=200)
+        all_docs = await _retrieve_all_chunks(session_id, limit=200)
         primary_trace = {
             "semantic_count": len(all_docs), "bm25_count": 0,
             "merged_count": len(all_docs), "final_count": len(all_docs),
             "reranked": False, "mode": "full_collection",
         }
     elif filename:
-        all_docs = await _retrieve_by_filename(filename, rewritten, effective_top_k)
+        all_docs = await _retrieve_by_filename(filename, rewritten, effective_top_k, session_id)
         if all_docs:
             primary_trace = {
                 "semantic_count": len(all_docs), "bm25_count": 0,
@@ -670,7 +674,7 @@ async def rag_pipeline(
     if not all_docs:
         all_queries = [rewritten] + sub_queries
         tasks       = [
-            hybrid_retrieve(q, top_k=effective_top_k, enable_reranking=effective_reranking)
+            hybrid_retrieve(q, session_id, top_k=effective_top_k, enable_reranking=effective_reranking)
             for q in all_queries
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)

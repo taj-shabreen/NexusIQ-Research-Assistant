@@ -235,6 +235,7 @@ def _rerank(
 
 async def hybrid_retrieve(
     query: str,
+    session_id: str,
     top_k: Optional[int] = None,
     enable_reranking: bool = True,
     use_mmr: bool = False,
@@ -244,6 +245,10 @@ async def hybrid_retrieve(
     Full hybrid retrieval: semantic + BM25 → RRF → (MMR or reranking).
 
     Parameters:
+      session_id: REQUIRED — scopes both semantic and BM25 retrieval to
+                  only this session's chunks. Without this, queries from
+                  one user would retrieve and answer using another user's
+                  privately uploaded documents.
       use_mmr:    If True, use MMR diversity reranking instead of cross-encoder.
                   Recommended for summary/synthesis queries.
       mmr_lambda: MMR relevance weight (0.6 = 60% relevance, 40% diversity).
@@ -252,19 +257,23 @@ async def hybrid_retrieve(
     fetch_k = k * 4   # fetch more candidates for better reranking
 
     collection = get_or_create_collection()
-    total_docs = collection.count()
+    # Session-scoped count, not the global collection count — otherwise a
+    # session with zero documents would incorrectly pass this check just
+    # because some other session has uploaded files.
+    _session_probe = collection.get(where={"session_id": session_id}, include=[])
+    total_docs = len(_session_probe.get("ids") or [])
 
     logger.info(
-        "hybrid_retrieve | query='%s…' | top_k=%d | fetch_k=%d | collection=%d | mmr=%s",
-        query[:60], k, fetch_k, total_docs, use_mmr,
+        "hybrid_retrieve | query='%s…' | session=%s | top_k=%d | fetch_k=%d | session_docs=%d | mmr=%s",
+        query[:60], session_id, k, fetch_k, total_docs, use_mmr,
     )
 
     if total_docs == 0:
-        logger.error("Collection EMPTY — no documents indexed!")
+        logger.error("Session '%s' has no indexed documents!", session_id)
         return [], {
             "semantic_count": 0, "bm25_count": 0, "merged_count": 0,
             "final_count": 0, "top_k_requested": k,
-            "error": "Collection is empty",
+            "error": "No documents indexed for this session",
         }
 
     # ── 1. Semantic retrieval ──────────────────────────────────────
@@ -280,6 +289,7 @@ async def hybrid_retrieve(
         raw_sem = collection.query(
             query_embeddings=[query_embedding],
             n_results=effective_k,
+            where={"session_id": session_id},
             include=["documents", "metadatas", "distances", "embeddings"],
         )
 
@@ -322,7 +332,7 @@ async def hybrid_retrieve(
     bm25_scores:  List[float]                  = []
 
     try:
-        raw      = collection.get(include=["documents", "metadatas"])
+        raw      = collection.get(where={"session_id": session_id}, include=["documents", "metadatas"])
         corpus:  List[str]  = raw.get("documents") or []
         metas:   List[dict] = raw.get("metadatas") or []
 
@@ -412,17 +422,20 @@ async def hybrid_retrieve(
 
 async def debug_retrieval(
     query: str,
+    session_id: str,
     top_k: int,
     method: str,
 ) -> dict:
     """
     Debug retrieval: exposes raw BM25, semantic, and reranker scores.
     Used by /api/debug/chunks and /api/debug/retrieve endpoints.
+    Scoped to session_id — otherwise this endpoint would let any session
+    inspect any other session's private document chunks.
     """
     method     = method.lower()
     collection = get_or_create_collection()
 
-    raw_data = collection.get(include=["documents", "metadatas"])
+    raw_data = collection.get(where={"session_id": session_id}, include=["documents", "metadatas"])
     corpus:  List[str]  = raw_data.get("documents") or []
     metas:   List[dict] = raw_data.get("metadatas") or []
 
@@ -434,12 +447,13 @@ async def debug_retrieval(
     if method in ("hybrid", "semantic"):
         try:
             query_embedding = embedding_manager.embed_query(query)
-            total           = collection.count()
+            total           = len(corpus)   # session-scoped count, not collection.count()
             eff_k           = min(top_k * 4, total) if total > 0 else 0
             if eff_k > 0:
                 raw_sem = collection.query(
                     query_embeddings=[query_embedding],
                     n_results=eff_k,
+                    where={"session_id": session_id},
                     include=["documents", "metadatas", "distances"],
                 )
                 if raw_sem["ids"] and raw_sem["ids"][0]:
