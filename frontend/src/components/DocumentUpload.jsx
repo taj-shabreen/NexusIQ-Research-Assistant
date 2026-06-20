@@ -97,30 +97,12 @@ export default function DocumentUpload({ onUploaded }) {
   onUploaded,
   blocked,
 ])
-
-      // Provide a meaningful error based on the error type
-      let msg = err.message || 'Upload failed'
-      if (msg.includes('not ready') || msg.includes('503')) {
-        msg = 'Backend is still initialising. Please wait a moment and try again.'
-      } else if (msg.includes('timed out')) {
-        msg = 'Upload timed out — the PDF may be very large. Try a smaller file first.'
-      } else if (msg.includes('Cannot reach')) {
-        msg = 'Cannot reach backend. Make sure the server is running on port 8000.'
-      }
-
-      setUploadError(msg)
-      setTimeout(() => setUploadError(null), 6000)
-    } finally {
-      setUploading(false)
-    }
-  }, [addDocuments, setUploading, setUploadError, onUploaded, blocked])
-
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop,
-    accept: { 'application/pdf': ['.pdf'] },
-    multiple: true,
-    disabled: isUploading || blocked,
-  })
+const { getRootProps, getInputProps, isDragActive } = useDropzone({
+  onDrop,
+  accept: { 'application/pdf': ['.pdf'] },
+  multiple: true,
+  disabled: isUploading || blocked,
+})
 
   /* ── Visual states ──────────────────────────────────────────── */
   const isDisabled = isUploading || blocked
