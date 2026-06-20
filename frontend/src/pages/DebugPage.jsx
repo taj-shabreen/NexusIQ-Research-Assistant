@@ -328,20 +328,20 @@ export default function DebugPage() {
             {health && (
               <div>
                 <InfoRow label="Status"    value={health.status}    valueColor="var(--emerald)" />
-                <InfoRow label="LLM Model" value={health.model} />
+                <InfoRow label="LLM Model" value={health.groq_model} />
                 <InfoRow label="Embed Model" value={health.embed_model} />
                 <InfoRow
                   label="Groq Key"
                   value={health.groq_key_set ? 'Configured ✓' : 'Missing ✗'}
                   valueColor={health.groq_key_set ? 'var(--emerald)' : 'var(--rose)'}
                 />
-                <InfoRow label="Collection" value={health.chroma_collection} />
+                <InfoRow label="Collection" value={health.collection} />
                 <InfoRow
                   label="Chunks in DB"
-                  value={health.chunks_stored >= 0 ? health.chunks_stored.toString() : 'Error'}
-                  valueColor={health.chunks_stored > 0 ? 'var(--sapphire)' : 'var(--amber)'}
+                  value={health.chunk_count >= 0 ? health.chunk_count.toString() : 'Error'}
+                  valueColor={health.chunk_count > 0 ? 'var(--sapphire)' : 'var(--amber)'}
                 />
-                <InfoRow label="Environment" value={health.env} />
+                <InfoRow label="Environment" value={health.db_status} />
               </div>
             )}
           </div>
