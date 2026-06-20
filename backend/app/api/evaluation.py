@@ -23,7 +23,7 @@ KEY FIXES vs original:
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Header
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger("nexusiq.api.evaluation")
