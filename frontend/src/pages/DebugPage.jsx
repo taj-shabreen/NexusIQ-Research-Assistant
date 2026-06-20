@@ -558,13 +558,13 @@ export default function DebugPage() {
                   {
                     icon: Layers,
                     label: 'Chunks returned',
-                    value: retrieveResult.total_returned,
+                    value: retrieveResult.results?.length ?? 0,
                     color: '#4a90e2',
                   },
                   {
                     icon: Activity,
                     label: 'Method',
-                    value: retrieveResult.method?.toUpperCase(),
+                    value: (retrieveResult.trace?.method ?? method)?.toUpperCase(),
                     color: 'var(--lavender)',
                   },
                   {
@@ -595,10 +595,20 @@ export default function DebugPage() {
               </div>
 
               {/* Chunk cards */}
-              {retrieveResult.chunks?.length > 0 ? (
+              {retrieveResult.results?.length > 0 ? (
                 <div className="space-y-2">
-                  {retrieveResult.chunks.map((chunk, i) => (
-                    <ChunkCard key={i} chunk={chunk} index={i} />
+                  {retrieveResult.results.map((r, i) => (
+                    <ChunkCard
+                      key={i}
+                      index={i}
+                      chunk={{
+                        rank:    i + 1,
+                        source:  r.filename,
+                        page:    r.page,
+                        preview: r.text,
+                        score:   r.score,
+                      }}
+                    />
                   ))}
                 </div>
               ) : (
