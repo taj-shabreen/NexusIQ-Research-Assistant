@@ -80,7 +80,10 @@ class EvalHistoryEntry(BaseModel):
 
 # ── Helper: auto-generate answer + contexts via RAG ───────────────
 
-async def _enrich_sample(sample: EvalSample) -> Dict:
+async def _enrich_sample(
+    sample: EvalSample,
+    session_id: str,
+):
     """
     If answer or contexts are missing, call rag_pipeline() to generate them.
 
@@ -103,6 +106,7 @@ async def _enrich_sample(sample: EvalSample) -> Dict:
 
             result = await rag_pipeline(
                 question=sample.question,
+                session_id=session_id,
                 history=[],
                 top_k=6,
                 enable_reranking=True,
@@ -169,7 +173,10 @@ async def _enrich_sample(sample: EvalSample) -> Dict:
     status_code=status.HTTP_200_OK,
     summary="Run evaluation — auto-generates answers+contexts from RAG if missing",
 )
-async def run_evaluation(request: EvalRequest) -> EvalResponse:
+async def run_evaluation(
+    request: EvalRequest,
+    x_session_id: str = Header(...)
+):
     """
     Workflow:
       1. For each sample, if answer/contexts missing → call rag_pipeline().
@@ -182,7 +189,10 @@ async def run_evaluation(request: EvalRequest) -> EvalResponse:
     # ── Step 1: Enrich all samples ────────────────────────────────
     enriched: List[Dict] = []
     for s in request.samples:
-        e = await _enrich_sample(s)
+        e = await _enrich_sample(
+            s,
+            x_session_id,
+        )
         enriched.append(e)
         logger.info(
             "Enriched sample '%s…' | answer_chars=%d | contexts=%d",
