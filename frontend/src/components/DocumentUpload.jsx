@@ -25,6 +25,7 @@ export default function DocumentUpload({ onUploaded }) {
 
   const onDrop = useCallback(async (accepted) => {
     if (!accepted.length) return
+
     if (blocked) {
       setUploadError('Backend is not ready yet. Please wait and retry.')
       setTimeout(() => setUploadError(null), 4000)
@@ -35,27 +36,14 @@ export default function DocumentUpload({ onUploaded }) {
     setJustDone(false)
     setProgress(0)
     setRetryMsg(null)
-const onDrop = useCallback(async (accepted) => {
-  if (!accepted.length) return
 
-  if (blocked) {
-    setUploadError('Backend is not ready yet. Please wait and retry.')
-    setTimeout(() => setUploadError(null), 4000)
-    return
-  }
+    try {
+      for (const file of accepted) {
+        const form = new FormData()
+        form.append('file', file)
 
-  setUploading(true)
-  setJustDone(false)
-  setProgress(0)
-  setRetryMsg(null)
-
-  try {
-    for (const file of accepted) {
-      const form = new FormData()
-      form.append('file', file)
-
-      const res = await documentsApi.upload(form, (evt) => {
-        if (evt.total) {
+        const res = await documentsApi.upload(form, (evt) => {
+         if (evt.total) {
           const pct = Math.round((evt.loaded / evt.total) * 100)
           setProgress(pct)
 
@@ -65,24 +53,24 @@ const onDrop = useCallback(async (accepted) => {
         }
       })
 
-      addDocuments([
+     addDocuments([
         {
           filename: res.data.filename,
           chunks: res.data.chunks,
         },
-      ])
-    }
+     ])
+   }
 
-    setJustDone(true)
-    setProgress(0)
-    setRetryMsg(null)
+   setJustDone(true)
+   setProgress(0)
+   setRetryMsg(null)
 
-    setTimeout(() => setJustDone(false), 4000)
+   setTimeout(() => setJustDone(false), 4000)
 
-    onUploaded?.()
-  } catch (err) {
-    setProgress(0)
-    setRetryMsg(null)
+   onUploaded?.()
+ } catch (err) {
+     setProgress(0)
+     setRetryMsg(null)
 
     let msg = err.message || 'Upload failed'
 
@@ -109,6 +97,7 @@ const onDrop = useCallback(async (accepted) => {
   onUploaded,
   blocked,
 ])
+
       // Provide a meaningful error based on the error type
       let msg = err.message || 'Upload failed'
       if (msg.includes('not ready') || msg.includes('503')) {
