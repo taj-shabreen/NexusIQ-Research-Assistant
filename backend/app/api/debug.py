@@ -103,7 +103,10 @@ async def debug_retrieve(req: RetrieveRequest, x_session_id: str = Header(..., a
     try:
         from app.rag.retriever import hybrid_retrieve
         docs, trace = await hybrid_retrieve(
-            req.query, session_id, top_k=req.top_k, enable_reranking=True
+            query=req.query,
+            session_id=session_id,
+            top_k=req.top_k,
+            enable_reranking=True,
         )
         return {
             "query":   req.query,
