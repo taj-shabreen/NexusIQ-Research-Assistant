@@ -21,14 +21,19 @@ class RetrieveRequest(BaseModel):
 
 
 @router.get("/health")
-async def debug_health():
+async def debug_health(x_session_id: str = Header(..., alias="X-Session-Id")):
     from app.rag.vectorstore import get_or_create_collection
     from app.rag.embeddings  import embedding_manager
 
+    if not x_session_id or not x_session_id.strip():
+        raise HTTPException(status_code=400, detail="X-Session-Id header is required.")
+    session_id = x_session_id.strip()
+
     try:
-        collection  = get_or_create_collection()
-        chunk_count = collection.count()
-        db_status   = "ok"
+        collection   = get_or_create_collection()
+        session_data = collection.get(where={"session_id": session_id}, include=[])
+        chunk_count  = len(session_data.get("ids") or [])
+        db_status    = "ok"
     except Exception as exc:
         chunk_count = 0
         db_status   = str(exc)
@@ -39,28 +44,33 @@ async def debug_health():
     model_loaded = True   # always true: there's nothing to lazily load
 
     return {
-        "status":       "ok",
-        "groq_model":   settings.groq_model,
-        "groq_key_set": bool(settings.groq_api_key),
-        "embed_model":  settings.embedding_model,
-        "embed_loaded": model_loaded,
-        "chroma_path":  settings.chroma_persist_dir,
-        "chunk_count":  chunk_count,
-        "db_status":    db_status,
-        "reranker":     settings.reranker_model,
-        "reranker_on":  settings.reranker_enabled,
+        "status":         "ok",
+        "groq_model":     settings.groq_model,
+        "groq_key_set":   bool(settings.groq_api_key),
+        "embed_model":    settings.embedding_model,
+        "embed_loaded":   model_loaded,
+        "chroma_path":    settings.chroma_persist_dir,
+        "collection":     settings.chroma_collection,
+        "chunk_count":    chunk_count,   # session-scoped, not global
+        "db_status":      db_status,
+        "reranker":       settings.reranker_model,
+        "reranker_on":    settings.reranker_enabled,
     }
 
 
 @router.get("/stats")
-async def debug_stats():
+async def debug_stats(x_session_id: str = Header(..., alias="X-Session-Id")):
+    if not x_session_id or not x_session_id.strip():
+        raise HTTPException(status_code=400, detail="X-Session-Id header is required.")
+    session_id = x_session_id.strip()
+
     try:
         from app.rag.vectorstore import get_or_create_collection
         collection = get_or_create_collection()
-        total      = collection.count()
 
-        result    = collection.get(include=["metadatas"])
+        result    = collection.get(where={"session_id": session_id}, include=["metadatas"])
         metadatas = result.get("metadatas") or []
+        total     = len(metadatas)
 
         doc_chunks: Dict[str, int] = {}
         for m in metadatas:
@@ -74,6 +84,9 @@ async def debug_stats():
                 {"filename": k, "chunks": v}
                 for k, v in sorted(doc_chunks.items())
             ],
+            "collection_name": settings.chroma_collection,
+            "persist_dir":     settings.chroma_persist_dir,
+            "embed_model":     settings.embedding_model,
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -111,5 +124,5 @@ async def debug_retrieve(req: RetrieveRequest, x_session_id: str = Header(..., a
 
 
 @router.get("/collection-stats")
-async def collection_stats():
-    return await debug_stats()
+async def collection_stats(x_session_id: str = Header(..., alias="X-Session-Id")):
+    return await debug_stats(x_session_id)
