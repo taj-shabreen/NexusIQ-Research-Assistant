@@ -43,60 +43,64 @@ export default function DocumentUpload({ onUploaded }) {
         form.append('file', file)
 
         const res = await documentsApi.upload(form, (evt) => {
-         if (evt.total) {
-          const pct = Math.round((evt.loaded / evt.total) * 100)
-          setProgress(pct)
+          if (evt.total) {
+            const pct = Math.round((evt.loaded / evt.total) * 100)
+            setProgress(pct)
 
-          if (pct >= 100) {
-            setRetryMsg(`Indexing ${file.name}...`)
+            if (pct >= 100) {
+              setRetryMsg(`Indexing ${file.name}...`)
+            }
           }
-        }
-      })
+        })
 
-     addDocuments([
-        {
-          filename: res.data.filename,
-          chunks: res.data.chunks,
-        },
-     ])
-   }
+        addDocuments([
+          {
+            filename: res.data.filename,
+            chunks: res.data.chunks,
+          },
+        ])
+      }
 
-   setJustDone(true)
-   setProgress(0)
-   setRetryMsg(null)
+      setJustDone(true)
+      setProgress(0)
+      setRetryMsg(null)
 
-   setTimeout(() => setJustDone(false), 4000)
+      setTimeout(() => {
+        setJustDone(false)
+      }, 4000)
 
-   onUploaded?.()
- } catch (err) {
-     setProgress(0)
-     setRetryMsg(null)
+      onUploaded?.()
 
-    let msg = err.message || 'Upload failed'
+    } catch (err) {
+      setProgress(0)
+      setRetryMsg(null)
 
-    if (msg.includes('not ready') || msg.includes('503')) {
-      msg =
-        'Backend is still initialising. Please wait a moment and try again.'
-    } else if (msg.includes('timed out')) {
-      msg =
-        'Upload timed out — the PDF may be very large. Try a smaller file first.'
-    } else if (msg.includes('Cannot reach')) {
-      msg =
-        'Cannot reach backend. Make sure the server is running on port 8000.'
+      let msg = err.message || 'Upload failed'
+
+      if (msg.includes('not ready') || msg.includes('503')) {
+        msg =
+          'Backend is still initialising. Please wait a moment and try again.'
+      } else if (msg.includes('timed out')) {
+        msg =
+          'Upload timed out — the PDF may be very large. Try a smaller file first.'
+      } else if (msg.includes('Cannot reach')) {
+        msg =
+          'Cannot reach backend. Make sure the server is running on port 8000.'
+      }
+
+      setUploadError(msg)
+      setTimeout(() => setUploadError(null), 6000)
+
+    } finally {
+      setUploading(false)
     }
-
-    setUploadError(msg)
-    setTimeout(() => setUploadError(null), 6000)
-  } finally {
-    setUploading(false)
-  }
-}, [
-  addDocuments,
-  setUploading,
-  setUploadError,
-  onUploaded,
-  blocked,
-])
+  }, [
+    addDocuments,
+    setUploading,
+    setUploadError,
+    onUploaded,
+    blocked,
+  ])
 const { getRootProps, getInputProps, isDragActive } = useDropzone({
   onDrop,
   accept: { 'application/pdf': ['.pdf'] },
