@@ -124,7 +124,7 @@ const QUERY_HINTS = [
 ───────────────────────────────────────────────────────────────── */
 function DocItem({ doc, onDelete }) {
   const { isDocumentDeleting } = useDocumentStore()
-  const docId     = doc.document_id ?? doc.id
+  const docId = doc.filename
   const isDeleting = isDocumentDeleting(docId)
 
   return (
@@ -157,7 +157,7 @@ function DocItem({ doc, onDelete }) {
       <motion.button
         whileHover={{ scale: 1.15 }}
         whileTap={{ scale: .9 }}
-        onClick={() => onDelete(docId)}
+        onClick={() => onDelete(doc.filename)}
         disabled={isDeleting}
         className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg"
         style={{ color: 'var(--rose)' }}
@@ -334,7 +334,7 @@ export default function ResearchPage() {
               ) : (
                 documents.map(doc => (
                   <DocItem
-                    key={doc.document_id ?? doc.id}
+                    key={doc.filename}
                     doc={doc}
                     onDelete={handleDelete}
                   />
