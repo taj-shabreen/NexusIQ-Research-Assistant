@@ -35,39 +35,80 @@ export default function DocumentUpload({ onUploaded }) {
     setJustDone(false)
     setProgress(0)
     setRetryMsg(null)
+const onDrop = useCallback(async (accepted) => {
+  if (!accepted.length) return
 
-    const form = new FormData()
+  if (blocked) {
+    setUploadError('Backend is not ready yet. Please wait and retry.')
+    setTimeout(() => setUploadError(null), 4000)
+    return
+  }
 
-    // backend expects "file"
-    form.append('file', accepted[0])
+  setUploading(true)
+  setJustDone(false)
+  setProgress(0)
+  setRetryMsg(null)
 
-    try {
+  try {
+    for (const file of accepted) {
+      const form = new FormData()
+      form.append('file', file)
+
       const res = await documentsApi.upload(form, (evt) => {
         if (evt.total) {
           const pct = Math.round((evt.loaded / evt.total) * 100)
           setProgress(pct)
 
-          // When the HTTP upload finishes (100%), show "Indexing…"
-          // The backend then processes the file (chunking + embedding).
-          // This can take 5-30s depending on PDF size.
-          if (pct >= 100) setRetryMsg('Indexing document…')
+          if (pct >= 100) {
+            setRetryMsg(`Indexing ${file.name}...`)
+          }
         }
       })
 
-      addDocuments(
-         Array.isArray(res.data)
-            ? res.data
-            : [res.data]
-      )
-      setJustDone(true)
-      setProgress(0)
-      setRetryMsg(null)
-      setTimeout(() => setJustDone(false), 4000)
-      onUploaded?.()
-    } catch (err) {
-      setProgress(0)
-      setRetryMsg(null)
+      addDocuments([
+        {
+          filename: res.data.filename,
+          chunks: res.data.chunks,
+        },
+      ])
+    }
 
+    setJustDone(true)
+    setProgress(0)
+    setRetryMsg(null)
+
+    setTimeout(() => setJustDone(false), 4000)
+
+    onUploaded?.()
+  } catch (err) {
+    setProgress(0)
+    setRetryMsg(null)
+
+    let msg = err.message || 'Upload failed'
+
+    if (msg.includes('not ready') || msg.includes('503')) {
+      msg =
+        'Backend is still initialising. Please wait a moment and try again.'
+    } else if (msg.includes('timed out')) {
+      msg =
+        'Upload timed out — the PDF may be very large. Try a smaller file first.'
+    } else if (msg.includes('Cannot reach')) {
+      msg =
+        'Cannot reach backend. Make sure the server is running on port 8000.'
+    }
+
+    setUploadError(msg)
+    setTimeout(() => setUploadError(null), 6000)
+  } finally {
+    setUploading(false)
+  }
+}, [
+  addDocuments,
+  setUploading,
+  setUploadError,
+  onUploaded,
+  blocked,
+])
       // Provide a meaningful error based on the error type
       let msg = err.message || 'Upload failed'
       if (msg.includes('not ready') || msg.includes('503')) {
