@@ -10,7 +10,7 @@ import hashlib
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, Header, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
 from app.config import settings
@@ -26,9 +26,20 @@ def _sha256(data: bytes) -> str:
 
 
 @router.post("/upload")
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(
+    file: UploadFile = File(...),
+    x_session_id: str = Header(..., alias="X-Session-Id"),
+):
     from app.rag.ingestion import ingest_document  # deferred — avoids startup import
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)   # deferred — ensures disk is mounted
+    if not x_session_id or not x_session_id.strip():
+        raise HTTPException(status_code=400, detail="X-Session-Id header is required.")
+    session_id = x_session_id.strip()
+
+    # Scope on-disk storage per session so two sessions uploading a
+    # same-named file (e.g. "report.pdf") never overwrite each other.
+    session_dir = UPLOAD_DIR / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)   # deferred — ensures disk is mounted
+
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
@@ -37,17 +48,18 @@ async def upload_document(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
     file_hash  = _sha256(content)
-    dest_path  = UPLOAD_DIR / file.filename
-    hash_file  = UPLOAD_DIR / f".{file.filename}.sha256"
+    dest_path  = session_dir / file.filename
+    hash_file  = session_dir / f".{file.filename}.sha256"
 
-    # Duplicate detection
+    # Duplicate detection — scoped to this session only
     if dest_path.exists() and hash_file.exists():
         if hash_file.read_text().strip() == file_hash:
             try:
                 from app.rag.vectorstore import get_or_create_collection
                 collection  = get_or_create_collection()
                 result      = collection.get(
-                    where={"filename": file.filename}, include=["metadatas"]
+                    where={"$and": [{"filename": file.filename}, {"session_id": session_id}]},
+                    include=["metadatas"],
                 )
                 chunk_count = len(result.get("ids") or [])
             except Exception:
@@ -61,10 +73,10 @@ async def upload_document(file: UploadFile = File(...)):
 
     dest_path.write_bytes(content)
     hash_file.write_text(file_hash)
-    logger.info("Saved: %s (%d bytes)", file.filename, len(content))
+    logger.info("Saved: %s (%d bytes) [session=%s]", file.filename, len(content), session_id)
 
     try:
-        chunk_count = await ingest_document(str(dest_path), file.filename)
+        chunk_count = await ingest_document(str(dest_path), file.filename, session_id)
     except Exception as exc:
         dest_path.unlink(missing_ok=True)
         hash_file.unlink(missing_ok=True)
@@ -80,11 +92,15 @@ async def upload_document(file: UploadFile = File(...)):
 
 
 @router.get("/")
-async def list_documents():
+async def list_documents(x_session_id: str = Header(..., alias="X-Session-Id")):
+    if not x_session_id or not x_session_id.strip():
+        raise HTTPException(status_code=400, detail="X-Session-Id header is required.")
+    session_id = x_session_id.strip()
+
     try:
         from app.rag.vectorstore import get_or_create_collection
         collection = get_or_create_collection()
-        result     = collection.get(include=["metadatas"])
+        result     = collection.get(where={"session_id": session_id}, include=["metadatas"])
         metadatas  = result.get("metadatas") or []
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -104,17 +120,39 @@ async def list_documents():
 
 
 @router.delete("/{filename}")
-async def delete_document(filename: str):
+async def delete_document(filename: str, x_session_id: str = Header(..., alias="X-Session-Id")):
+    if not x_session_id or not x_session_id.strip():
+        raise HTTPException(status_code=400, detail="X-Session-Id header is required.")
+    session_id = x_session_id.strip()
+
     try:
         from app.rag.vectorstore import get_or_create_collection
         collection = get_or_create_collection()
-        result     = collection.get(where={"filename": filename}, include=["metadatas"])
+        result     = collection.get(
+            where={"$and": [{"filename": filename}, {"session_id": session_id}]},
+            include=["metadatas"],
+        )
         ids        = result.get("ids") or []
         if ids:
             collection.delete(ids=ids)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    (UPLOAD_DIR / filename).unlink(missing_ok=True)
-    (UPLOAD_DIR / f".{filename}.sha256").unlink(missing_ok=True)
-    return {"message": f"'{filename}' deleted.", "filename": filename}
+    session_dir  = UPLOAD_DIR / session_id
+    file_existed = (session_dir / filename).exists()
+    (session_dir / filename).unlink(missing_ok=True)
+    (session_dir / f".{filename}.sha256").unlink(missing_ok=True)
+
+    if not ids and not file_existed:
+        # Nothing matched — likely a wrong/stale filename was sent.
+        # Surface this clearly instead of returning a fake success message.
+        raise HTTPException(
+            status_code=404,
+            detail=f"No document found with filename '{filename}' — 0 chunks and no file matched.",
+        )
+
+    return {
+        "message":       f"'{filename}' deleted.",
+        "filename":      filename,
+        "chunks_deleted": len(ids),
+    }

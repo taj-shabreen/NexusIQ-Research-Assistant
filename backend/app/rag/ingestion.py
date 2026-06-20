@@ -78,7 +78,7 @@ def _chunk_text(text: str, chunk_size: int, overlap: int) -> List[str]:
     return chunks
 
 
-async def ingest_document(pdf_path: str, filename: str) -> int:
+async def ingest_document(pdf_path: str, filename: str, session_id: str) -> int:
     loop     = asyncio.get_running_loop()
     raw_text = await loop.run_in_executor(None, _extract_text, pdf_path)
 
@@ -99,13 +99,17 @@ async def ingest_document(pdf_path: str, filename: str) -> int:
 
     collection = get_or_create_collection()
 
-    # Delete stale chunks
+    # Delete stale chunks — scoped to this session so a re-upload by one
+    # user can't delete another user's identically-named file.
     try:
-        existing = collection.get(where={"filename": filename}, include=["metadatas"])
+        existing = collection.get(
+            where={"$and": [{"filename": filename}, {"session_id": session_id}]},
+            include=["metadatas"],
+        )
         old_ids  = existing.get("ids") or []
         if old_ids:
             collection.delete(ids=old_ids)
-            logger.info("Deleted %d stale chunks for %s", len(old_ids), filename)
+            logger.info("Deleted %d stale chunks for %s (session=%s)", len(old_ids), filename, session_id)
     except Exception:
         pass
 
@@ -138,6 +142,7 @@ async def ingest_document(pdf_path: str, filename: str) -> int:
             "chunk_index": i,
             "chunk_count": len(chunks),
             "page":        i,
+            "session_id":  session_id,
         }
         for i in range(len(chunks))
     ]
