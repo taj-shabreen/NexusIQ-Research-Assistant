@@ -1,57 +1,50 @@
-/**
- * NexusIQ — hooks/useDocuments.js
- * Custom hook: fetch & manage the document list from the backend.
- */
-
-import { useCallback, useEffect } from 'react'
-import { documentsApi } from '../services/api'
+import { useCallback } from 'react'
 import { useDocumentStore } from '../store/documentStore'
+import { documentsApi } from '../services/api'
 
 export function useDocuments() {
-  const {
-    documents,
-    isFetching,
-    uploadError,
-    setDocuments,
-    setFetching,
-    removeDocument: storeRemove,
-  } = useDocumentStore()
+  const { documents, isLoading, error, setDocuments, setLoading, setError, addDocument, removeDocument } =
+    useDocumentStore()
 
-  // ── Fetch document list ─────────────────────────────────────────
   const fetchDocuments = useCallback(async () => {
-    setFetching(true)
+    setLoading(true)
+    setError(null)
     try {
       const res = await documentsApi.list()
-
-      setDocuments(res.data?.documents ?? [])
+      setDocuments(res.data.documents || [])
     } catch (err) {
-      console.error('[useDocuments] fetch error:', err.message)
+      setError(err.message)
     } finally {
-      setFetching(false)
+      setLoading(false)
     }
-  }, [setDocuments, setFetching])
+  }, [setDocuments, setLoading, setError])
 
-  // ── Delete a document ───────────────────────────────────────────
-  const deleteDocument = useCallback(async (documentId) => {
-    try {
-      await documentsApi.remove(documentId)
-      storeRemove(documentId)
-    } catch (err) {
-      console.error('[useDocuments] delete error:', err.message)
-      throw err // let caller handle UI feedback
+  const uploadDocument = useCallback(async (file, onProgress) => {
+    const form = new FormData()
+    form.append('file', file)
+    const res = await documentsApi.upload(form, (e) => {
+      const pct = Math.round((e.loaded * 100) / (e.total || 1))
+      onProgress?.(pct)
+    })
+    if (!res.data.duplicate) {
+      addDocument({ filename: res.data.filename, chunks: res.data.chunks })
     }
-  }, [storeRemove])
+    return res.data
+  }, [addDocument])
 
-  // ── Load on mount ───────────────────────────────────────────────
-  useEffect(() => {
-    fetchDocuments()
-  }, [fetchDocuments])
+  const deleteDocument = useCallback(async (filename) => {
+    if (!filename) {
+      throw new Error(
+        'deleteDocument called without a filename — filename is the only ' +
+        'identifier the backend accepts for DELETE /api/documents/{filename}.'
+      )
+    }
+    await documentsApi.remove(filename)
+    // Only update the store after the backend call succeeds — an optimistic
+    // removal here would hide the doc in the UI even if the backend silently
+    // matched zero chunks (e.g. wrong/stale filename) and deleted nothing.
+    removeDocument(filename)
+  }, [removeDocument])
 
-  return {
-    documents,
-    isFetching,
-    uploadError,
-    fetchDocuments,
-    deleteDocument,
-  }
+  return { documents, isLoading, error, fetchDocuments, uploadDocument, deleteDocument }
 }

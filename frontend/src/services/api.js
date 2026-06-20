@@ -7,6 +7,8 @@
  *   3. Exponential backoff  — waits between retries
  *   4. Meaningful errors    — maps network errors to user-readable messages
  *   5. Request timeout      — per-endpoint timeouts
+ *
+ * CRITICAL: Uses VITE_API_URL env var — never hardcodes localhost.
  */
 
 import axios from 'axios'
@@ -15,6 +17,31 @@ const BASE =
   import.meta.env.VITE_API_URL ||
   'http://127.0.0.1:8000'
 
+// ── Session ID — per-browser identity for document isolation ───────
+// No user accounts exist yet, so a randomly generated id persisted in
+// localStorage is the smallest mechanism that gives each browser its
+// own private document library. Sent as X-Session-Id on every request.
+const SESSION_STORAGE_KEY = 'nexusiq_session_id'
+
+function getOrCreateSessionId() {
+  try {
+    let id = localStorage.getItem(SESSION_STORAGE_KEY)
+    if (!id) {
+      id = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `sess_${Date.now()}_${Math.random().toString(36).slice(2)}`
+      localStorage.setItem(SESSION_STORAGE_KEY, id)
+    }
+    return id
+  } catch {
+    // localStorage unavailable (e.g. private browsing edge cases) —
+    // fall back to an in-memory id for this page load only.
+    return `sess_${Date.now()}_${Math.random().toString(36).slice(2)}`
+  }
+}
+
+export const sessionId = getOrCreateSessionId()
+
 // ── Base client ───────────────────────────────────────────────────
 export const http = axios.create({
   baseURL: `${BASE}/api`,
@@ -22,8 +49,10 @@ export const http = axios.create({
   headers: { 'Content-Type': 'application/json' },
 })
 
-// ── Request interceptor: log in dev ──────────────────────────────
+// ── Request interceptor: inject session id + log in dev ──────────
 http.interceptors.request.use((config) => {
+  config.headers = config.headers || {}
+  config.headers['X-Session-Id'] = sessionId
   if (import.meta.env.DEV) {
     console.debug(`[NexusIQ] ▶ ${config.method?.toUpperCase()} ${config.url}`)
   }
@@ -34,9 +63,7 @@ http.interceptors.request.use((config) => {
 http.interceptors.response.use(
   (res) => res,
   (err) => {
-    // Map common network failures to readable messages
     if (!err.response) {
-      // No response at all — backend unreachable
       const msg = err.code === 'ECONNABORTED'
         ? 'Request timed out — backend may still be loading. Please retry.'
         : 'Cannot reach backend — make sure the server is running on port 8000.'
@@ -64,25 +91,11 @@ http.interceptors.response.use(
 
 // ── Readiness API ─────────────────────────────────────────────────
 export const readyApi = {
-  /**
-   * Single readiness check.
-   * Returns { ready, subsystems, model, embed_model } or throws.
-   */
   async check() {
     const res = await axios.get(`${BASE}/ready`, { timeout: 5_000 })
     return res.data
   },
 
-  /**
-   * Poll /ready until the backend is fully ready.
-   *
-   * @param {object} options
-   * @param {number} options.maxAttempts   Max poll attempts (default 30 = 60s)
-   * @param {number} options.intervalMs    Base interval in ms (default 2000)
-   * @param {function} options.onProgress  Called each attempt: (attempt, state) => void
-   * @returns {Promise<object>}            Resolves with readiness data when ready
-   * @throws {Error}                       If maxAttempts exceeded
-   */
   async poll({
     maxAttempts = 30,
     intervalMs  = 2_000,
@@ -94,24 +107,19 @@ export const readyApi = {
         if (res.status === 200 && res.data?.ready) {
           return res.data
         }
-        // 200 but not ready (shouldn't happen per backend design, but guard)
         onProgress?.(attempt, res.data)
       } catch (err) {
         const data = err.response?.data
         if (err.response?.status === 503) {
-          // Expected during startup — not ready yet
           onProgress?.(attempt, data ?? { ready: false, error: 'starting…' })
         } else if (!err.response) {
-          // Backend not yet accepting connections
           onProgress?.(attempt, { ready: false, error: 'connecting…' })
         } else {
-          // Unexpected error — stop polling
           throw new Error(`Readiness check failed: ${err.message}`)
         }
       }
 
       if (attempt < maxAttempts) {
-        // Exponential backoff: 2s, 2.5s, 3s, 3.5s … capped at 6s
         const wait = Math.min(intervalMs * (1 + attempt * 0.1), 6_000)
         await new Promise(r => setTimeout(r, wait))
       }
@@ -125,11 +133,6 @@ export const readyApi = {
 
 // ── Health API ────────────────────────────────────────────────────
 export const healthApi = {
-  /**
-   * GET /health — always responds, returns per-subsystem status.
-   * Use readyApi.poll() to wait for full readiness.
-   * Use this for status display.
-   */
   check() {
     return axios.get(`${BASE}/health`, { timeout: 5_000 })
   },
@@ -138,7 +141,7 @@ export const healthApi = {
 // ── Documents API ─────────────────────────────────────────────────
 
 const MAX_UPLOAD_RETRIES = 2
-const UPLOAD_RETRY_DELAY = 2_000  // ms
+const UPLOAD_RETRY_DELAY = 2_000
 
 async function _uploadWithRetry(formData, onUploadProgress) {
   let lastError
@@ -147,7 +150,7 @@ async function _uploadWithRetry(formData, onUploadProgress) {
       const res = await http.post('/documents/upload', formData, {
         headers:          { 'Content-Type': 'multipart/form-data' },
         onUploadProgress,
-        timeout:          180_000,   // 3 min for large PDFs
+        timeout:          180_000,
       })
       return res
     } catch (err) {
@@ -174,21 +177,12 @@ async function _uploadWithRetry(formData, onUploadProgress) {
 }
 
 export const documentsApi = {
-  /**
-   * Upload one or more PDFs with automatic retry on network failures.
-   * @param {FormData} formData
-   * @param {function} onUploadProgress  Axios progress callback
-   */
   upload(formData, onUploadProgress) {
     return _uploadWithRetry(formData, onUploadProgress)
   },
-
-  /** List all indexed documents. */
   list() {
     return http.get('/documents/', { timeout: 15_000 })
   },
-
-  /** Delete a document and all its chunks. */
   remove(documentId) {
     return http.delete(`/documents/${documentId}`, { timeout: 30_000 })
   },
@@ -196,9 +190,9 @@ export const documentsApi = {
 
 // ── Query API ─────────────────────────────────────────────────────
 export const queryApi = {
-ask(payload) {
-  return http.post('/query/', payload, { timeout: 240_000 })  // 4 minutes
-},
+  ask(payload) {
+    return http.post('/query/', payload, { timeout: 240_000 })
+  },
 }
 
 // ── Evaluation API ────────────────────────────────────────────────
@@ -231,5 +225,15 @@ export const debugApi = {
   documentChunks(documentId, page = null) {
     const params = page ? { page } : {}
     return http.get(`/debug/documents/${documentId}`, { params, timeout: 15_000 })
+  },
+}
+
+// ── Visitor API ───────────────────────────────────────────────────
+export const visitorApi = {
+  register(name, email) {
+    return http.post('/visitors/register', { name, email })
+  },
+  stats() {
+    return http.get('/visitors/stats')
   },
 }
